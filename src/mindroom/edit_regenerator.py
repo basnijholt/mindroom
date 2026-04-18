@@ -18,13 +18,13 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.turn_policy import IngressHookRunner
     from mindroom.turn_store import TurnStore
 
@@ -56,7 +56,7 @@ class _GenerateResponse(Protocol):
 class EditRegeneratorDeps:
     """Collaborators needed for edit-triggered regeneration."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     runtime_paths: RuntimePaths
     agent_name: str

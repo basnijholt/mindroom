@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.runtime_protocols import SupportsThreadWriteCacheRuntime
 
 
 class ThreadMutationCacheOps:
@@ -22,7 +22,7 @@ class ThreadMutationCacheOps:
         self,
         *,
         logger_getter: Callable[[], structlog.stdlib.BoundLogger],
-        runtime: BotRuntimeView,
+        runtime: SupportsThreadWriteCacheRuntime,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime

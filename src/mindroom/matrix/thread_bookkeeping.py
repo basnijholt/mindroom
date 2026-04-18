@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.runtime_protocols import SupportsEventCache
 
 
 def is_thread_affecting_relation(event_info: EventInfo) -> bool:
@@ -170,7 +170,7 @@ class ThreadMutationResolver:
         self,
         *,
         logger_getter: Callable[[], structlog.stdlib.BoundLogger],
-        runtime: BotRuntimeView,
+        runtime: SupportsEventCache,
         fetch_event_info_for_thread_resolution: Callable[[str, str], Awaitable[EventInfo | None]],
     ) -> None:
         self._logger_getter = logger_getter

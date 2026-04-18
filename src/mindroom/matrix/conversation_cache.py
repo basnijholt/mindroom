@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.runtime_protocols import SupportsConversationCacheRuntime
 
 
 type ThreadReadResult = ThreadHistoryResult
@@ -337,7 +337,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
     """Own Matrix conversation reads and advisory cache writes for one bot."""
 
     logger: structlog.stdlib.BoundLogger
-    runtime: BotRuntimeView
+    runtime: SupportsConversationCacheRuntime
     _turn_event_cache: ContextVar[dict[tuple[str, str], _TurnEventLookup] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )

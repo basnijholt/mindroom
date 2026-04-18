@@ -35,11 +35,11 @@ if TYPE_CHECKING:
     import structlog
     from agno.models.message import Message
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -128,7 +128,7 @@ async def _put_bound_room_state(
 class HookContextSupport:
     """Own live hook bindings and shared hook-context base fields."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfigOrchestrator
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str

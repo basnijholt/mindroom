@@ -89,7 +89,6 @@ if TYPE_CHECKING:
     import structlog
     from agno.media import Image
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
@@ -99,6 +98,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
+    from mindroom.runtime_protocols import SupportsTurnControllerRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
 
@@ -146,7 +146,7 @@ type _PrecheckedMediaDispatchEvent = _PrecheckedEvent[_MediaDispatchEvent]
 class TurnControllerDeps:
     """Collaborators needed for turn control, policy, and execution."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsTurnControllerRuntime
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     storage_path: Path

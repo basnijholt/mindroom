@@ -35,10 +35,10 @@ if TYPE_CHECKING:
     import structlog
     from agno.media import Image
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.runtime_protocols import SupportsClientConfig
 
 type MediaDispatchEvent = (
     nio.RoomMessageImage
@@ -117,7 +117,7 @@ class DispatchPayloadWithAttachmentsRequest:
 class InboundTurnNormalizerDeps:
     """Explicit collaborators for inbound normalization."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     logger: structlog.stdlib.BoundLogger
     storage_path: Path
     runtime_paths: RuntimePaths

@@ -90,7 +90,6 @@ if TYPE_CHECKING:
     import structlog
     from agno.db.sqlite import SqliteDb
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -99,6 +98,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import SupportsResponseRunnerRuntime
     from mindroom.stop import StopManager
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -317,7 +317,7 @@ class TeamResponseRequest:
 class ResponseRunnerDeps:
     """Explicit collaborators for the response lifecycle."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsResponseRunnerRuntime
     logger: structlog.stdlib.BoundLogger
     stop_manager: StopManager
     runtime_paths: RuntimePaths

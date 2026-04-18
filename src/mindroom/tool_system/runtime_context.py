@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     import nio
     from structlog.stdlib import BoundLogger
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -39,6 +38,7 @@ if TYPE_CHECKING:
     from mindroom.hooks.types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ConversationEventCache
     from mindroom.matrix.identity import MatrixID
+    from mindroom.runtime_protocols import SupportsClientConfigEventCache
     from mindroom.scheduling import SchedulingRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -157,7 +157,7 @@ class ToolRuntimeHookBindings:
 class ToolRuntimeSupport:
     """Own shared tool-runtime context building and scoped execution helpers."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfigEventCache
     logger: BoundLogger
     runtime_paths: RuntimePaths
     storage_path: Path

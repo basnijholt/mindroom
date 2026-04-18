@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.runtime_protocols import SupportsClientConfig
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class BotRoomLifecycleDeps:
 
     agent_name: str
     agent_user: AgentMatrixUser
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     runtime_paths: RuntimePaths
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]

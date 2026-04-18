@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.conversation_resolver import (
         DispatchEvent,
         MediaDispatchEvent,
@@ -59,6 +58,7 @@ if TYPE_CHECKING:
         TextDispatchEvent,
     )
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import SupportsConfigOrchestrator
 
 
 @dataclass(frozen=True)
@@ -210,7 +210,7 @@ class IngressHookRunner:
 class TurnPolicyDeps:
     """Explicit collaborators needed by pure turn policy decisions."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsConfigOrchestrator
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str

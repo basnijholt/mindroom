@@ -22,12 +22,12 @@ if TYPE_CHECKING:
     import structlog
     from agno.db.base import SessionType
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway, DeliveryResult
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+    from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -83,7 +83,7 @@ class PostResponseEffectsDeps:
 class PostResponseEffectsSupport:
     """Shared support used to build per-response post-effect deps."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     delivery_gateway: DeliveryGateway

@@ -18,9 +18,9 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.runtime_protocols import SupportsEventCacheWriteCoordinator
 
 
 class ThreadReadPolicy:
@@ -30,7 +30,7 @@ class ThreadReadPolicy:
         self,
         *,
         logger_getter: typing.Callable[[], structlog.stdlib.BoundLogger],
-        runtime: BotRuntimeView,
+        runtime: SupportsEventCacheWriteCoordinator,
         fetch_thread_history_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
         fetch_thread_snapshot_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],
         fetch_dispatch_thread_history_from_client: typing.Callable[[str, str], typing.Awaitable[ThreadHistoryResult]],

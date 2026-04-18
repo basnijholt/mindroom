@@ -35,12 +35,12 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.history.types import CompactionOutcome
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.streaming import _StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
@@ -220,7 +220,7 @@ class StreamingDeliveryRequest:
 class DeliveryGatewayDeps:
     """Explicit dependencies needed for Matrix delivery."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfig
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
