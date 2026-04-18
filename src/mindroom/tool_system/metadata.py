@@ -962,6 +962,11 @@ def _restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
     sys.modules.update(snapshot.plugin_modules)
 
 
+capture_tool_registry_snapshot = _capture_tool_registry_snapshot
+restore_tool_registry_snapshot = _restore_tool_registry_snapshot
+scoped_plugin_registration_owner = _scoped_plugin_registration_owner
+
+
 def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
     """Return whether one loaded module originates from within one plugin root."""
     module_file = getattr(module, "__file__", None)
