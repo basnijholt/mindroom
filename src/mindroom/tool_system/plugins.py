@@ -15,13 +15,13 @@ from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.hooks.decorators import iter_module_hooks
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.plugin_identity import validate_plugin_name
+from mindroom.tool_system.runtime import validate_plugin_name
 from mindroom.tool_system.skills import set_plugin_skill_roots
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.hooks.types import HookCallback
-    from mindroom.tool_system.metadata import ToolMetadata
+    from mindroom.tool_system.catalog import ToolMetadata
 
 logger = get_logger(__name__)
 
@@ -103,7 +103,7 @@ def _warn_once(message: str, *, path: Path) -> None:
 
 def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
     """Remove plugin tool registrations for plugins no longer present in config."""
-    from mindroom.tool_system.metadata import synchronize_plugin_tools  # noqa: PLC0415
+    from mindroom.tool_system.catalog import synchronize_plugin_tools  # noqa: PLC0415
 
     active_tool_modules = [
         (plugin.name, _module_name(plugin.name, plugin.root, plugin.tools_module_path))
@@ -121,10 +121,10 @@ def load_plugins(
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
     import mindroom.tools  # noqa: F401, PLC0415
-    from mindroom.tool_system.metadata import (  # noqa: PLC0415
-        _capture_tool_registry_snapshot,
-        _restore_tool_registry_snapshot,
+    from mindroom.tool_system.catalog import (  # noqa: PLC0415
+        capture_tool_registry_snapshot,
         locked_tool_registry_state,
+        restore_tool_registry_snapshot,
     )
 
     with locked_tool_registry_state():
@@ -141,16 +141,16 @@ def load_plugins(
             runtime_paths,
             skip_broken_plugins=True,
         )
-        snapshot = _capture_tool_registry_snapshot()
+        snapshot = capture_tool_registry_snapshot()
         try:
             _reject_duplicate_plugin_manifest_names(plugin_bases)
 
             for plugin_base, plugin_entry, plugin_order in plugin_bases:
-                plugin_snapshot = _capture_tool_registry_snapshot()
+                plugin_snapshot = capture_tool_registry_snapshot()
                 try:
                     plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
                 except Exception as exc:
-                    _restore_tool_registry_snapshot(plugin_snapshot)
+                    restore_tool_registry_snapshot(plugin_snapshot)
                     _log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
                     continue
                 plugins.append(plugin)
@@ -164,7 +164,7 @@ def load_plugins(
             if set_skill_roots:
                 set_plugin_skill_roots(skill_roots)
         except Exception:
-            _restore_tool_registry_snapshot(snapshot)
+            restore_tool_registry_snapshot(snapshot)
             raise
 
         return plugins
@@ -460,7 +460,7 @@ def _prepare_plugin_tool_module_reload(
     cached: _ModuleCacheEntry | None,
 ) -> dict[str, dict[str, ToolMetadata]]:
     """Snapshot one tool module's cached registrations before reload."""
-    from mindroom.tool_system.metadata import (  # noqa: PLC0415
+    from mindroom.tool_system.catalog import (  # noqa: PLC0415
         clear_plugin_tool_registrations,
         snapshot_plugin_tool_registrations,
     )
@@ -483,7 +483,7 @@ def _restore_failed_plugin_tool_module_reload(
     previous_registrations_by_module_name: dict[str, dict[str, ToolMetadata]],
 ) -> None:
     """Restore cached tool registrations and module imports after one failed reload."""
-    from mindroom.tool_system.metadata import restore_plugin_tool_registrations  # noqa: PLC0415
+    from mindroom.tool_system.catalog import restore_plugin_tool_registrations  # noqa: PLC0415
 
     sys.modules.pop(module_name, None)
     for restored_module_name, registrations in previous_registrations_by_module_name.items():
@@ -536,9 +536,9 @@ def _load_plugin_module(
     sys.modules[module_name] = module
     try:
         if kind == "tools":
-            from mindroom.tool_system.metadata import _scoped_plugin_registration_owner  # noqa: PLC0415
+            from mindroom.tool_system.catalog import scoped_plugin_registration_owner  # noqa: PLC0415
 
-            with _scoped_plugin_registration_owner(module_name):
+            with scoped_plugin_registration_owner(module_name):
                 spec.loader.exec_module(module)
         else:
             spec.loader.exec_module(module)

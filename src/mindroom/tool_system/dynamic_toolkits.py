@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.models import ResolvedToolConfig
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.metadata import validate_authored_tool_entry_overrides
+from mindroom.tool_system.catalog import validate_authored_tool_entry_overrides
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

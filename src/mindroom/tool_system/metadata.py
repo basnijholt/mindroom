@@ -17,11 +17,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import plugins as plugin_module
-from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
-from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
-from mindroom.tool_system.worker_routing import (
+from mindroom.tool_system.runtime import (
     ResolvedWorkerTarget,
+    auto_install_tool_extra,
+    check_deps_installed,
+    maybe_wrap_toolkit_for_sandbox_proxy,
     supports_tool_name_for_worker_scope,
     unsupported_shared_only_integration_message,
 )
@@ -907,6 +907,7 @@ def ensure_tool_registry_loaded(
 ) -> None:
     """Ensure core and plugin tools are registered in the metadata registry."""
     import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
+    from mindroom.tool_system.extensions import load_plugins  # noqa: PLC0415
 
     if config is None:
         return
