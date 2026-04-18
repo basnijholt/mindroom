@@ -12,7 +12,7 @@ import httpx
 from agno.tools import Toolkit
 
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
-from mindroom.tool_system.worker_routing import (
+from mindroom.tool_system.runtime import (
     ResolvedWorkerTarget,
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,

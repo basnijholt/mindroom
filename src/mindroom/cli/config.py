@@ -35,7 +35,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.tool_system.runtime import agent_workspace_root_path
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:

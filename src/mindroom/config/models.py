@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 
 from mindroom.constants import UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.credentials import validate_service_name
-from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
+from mindroom.tool_system.runtime import WorkerScope  # noqa: TC001
 
 
 @dataclass(frozen=True)

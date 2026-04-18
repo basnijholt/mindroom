@@ -27,8 +27,7 @@ from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
 from mindroom.config.main import Config, ConfigRuntimeValidationError, _normalized_config_data, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
-from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
@@ -39,12 +38,13 @@ from mindroom.tool_system.metadata import (
     sanitize_tool_init_overrides,
     validate_authored_tool_entry_overrides,
 )
-from mindroom.tool_system.plugins import PluginValidationError
-from mindroom.tool_system.sandbox_proxy import to_json_compatible
-from mindroom.tool_system.worker_routing import (
+from mindroom.tool_system.extensions import PluginValidationError
+from mindroom.tool_system.runtime import (
     ToolExecutionIdentity,
     WorkerScope,
     build_worker_target_from_runtime_env,
+    sandbox_proxy_config,
+    to_json_compatible,
     tool_execution_identity,
 )
 from mindroom.workers.backends.local import get_local_worker_manager
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.metadata import ToolValidationInfo
+    from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.workers.models import WorkerHandle
 
 logger = get_logger(__name__)
@@ -227,7 +227,7 @@ def initialize_sandbox_runner_app(
         runtime_paths=runtime_paths,
         config=committed_config,
         tool_metadata=TOOL_METADATA.copy(),
-        runner_token=runner_token or sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token,
+        runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
 
 

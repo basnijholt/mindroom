@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.runtime import ToolExecutionIdentity
 
 
 @dataclass(frozen=True)

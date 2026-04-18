@@ -16,7 +16,7 @@ from mindroom.thread_summary import (
     ThreadSummaryWriteError,
     set_manual_thread_summary,
 )
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime import get_tool_runtime_context
 
 
 class ThreadSummaryTools(Toolkit):

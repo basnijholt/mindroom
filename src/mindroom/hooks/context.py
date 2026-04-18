@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.plugin_identity import validate_plugin_name
 
 from .state import (
     build_hook_room_state_putter,
@@ -41,7 +40,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
-    from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.runtime import ToolTraceEntry
 
     from .registry import HookRegistry, HookRegistryState
     from .sender import HookMessageSender
@@ -53,6 +52,8 @@ def _resolve_plugin_state_root(
     plugin_name: str,
 ) -> Path:
     """Return the plugin state root, creating it on first access."""
+    from mindroom.tool_system.runtime import validate_plugin_name  # noqa: PLC0415
+
     if runtime_paths is None:
         msg = "runtime_paths are required to access hook state_root"
         raise RuntimeError(msg)

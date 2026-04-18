@@ -18,7 +18,7 @@ from uuid import uuid4
 from agno.tools import Toolkit
 from playwright.async_api import Browser, BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths

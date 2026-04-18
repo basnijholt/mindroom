@@ -24,6 +24,7 @@ depends_on = [
     "mindroom.config.memory",
     "mindroom.constants",
     "mindroom.matrix.client",
+    "mindroom.tool_system.runtime",
 ]
 
 [[modules]]
@@ -230,6 +231,7 @@ depends_on = [
     "mindroom.response_runner",
     "mindroom.runtime_support",
     "mindroom.scheduling",
+    "mindroom.tool_system.runtime",
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
 ]
@@ -241,6 +243,8 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.conversation_cache",
     "mindroom.scheduling",
+    "mindroom.tool_system.extensions",
+    "mindroom.tool_system.runtime",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -256,11 +260,85 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.runtime_context"
-depends_on = ["mindroom.matrix.conversation_cache", "mindroom.scheduling"]
+depends_on = [
+    "mindroom.matrix.conversation_cache",
+    "mindroom.scheduling",
+    "mindroom.tool_system.plugin_identity",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tool_system.metadata"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.tool_system.extensions",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime",
+]
 
 [[modules]]
 path = "mindroom.tool_system.catalog"
 depends_on = ["mindroom.tool_system.metadata"]
+
+[[modules]]
+path = "mindroom.tool_system.dependencies"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.plugin_identity"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.worker_routing"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.events"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.tool_failures"
+depends_on = ["mindroom.constants"]
+
+[[modules]]
+path = "mindroom.tool_system.tool_hooks"
+depends_on = [
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_failures",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tool_system.sandbox_proxy"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tool_system.skills"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.credentials",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tool_system.dynamic_toolkits"
+depends_on = [
+    "mindroom.config.models",
+    "mindroom.tool_system.catalog",
+]
+
+[[modules]]
+path = "mindroom.tool_system.plugins"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.runtime",
+    "mindroom.tool_system.skills",
+]
 
 [[modules]]
 path = "mindroom.tool_system.runtime"
@@ -301,7 +379,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.streaming"
-depends_on = ["mindroom.constants", "mindroom.matrix.client", "mindroom.matrix.conversation_cache"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.tool_system.runtime",
+]
 
 [[modules]]
 path = "mindroom.post_response_effects"
@@ -667,6 +750,46 @@ expose = [
     "ToolValidationInfo",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
+    "capture_tool_registry_snapshot",
+    "clear_plugin_tool_registrations",
+    "default_worker_routed_tools",
+    "deserialize_tool_validation_snapshot",
+    "ensure_tool_registry_loaded",
+    "export_tools_metadata",
+    "get_tool_by_name",
+    "locked_tool_registry_state",
+    "normalize_authored_tool_overrides",
+    "resolved_tool_metadata_for_runtime",
+    "resolved_tool_validation_snapshot_for_runtime",
+    "restore_plugin_tool_registrations",
+    "restore_tool_registry_snapshot",
+    "sanitize_tool_init_overrides",
+    "scoped_plugin_registration_owner",
+    "serialize_tool_validation_snapshot",
+    "snapshot_plugin_tool_registrations",
+    "synchronize_plugin_tools",
+    "validate_authored_tool_entry_overrides",
+]
+from = ["mindroom.tool_system.metadata"]
+visibility = ["mindroom.tool_system.catalog"]
+exclusive = true
+
+[[interfaces]]
+expose = [
+    "ConfigField",
+    "SetupType",
+    "TOOL_METADATA",
+    "_TOOL_REGISTRY",
+    "ToolAuthoredOverrideValidator",
+    "ToolCategory",
+    "ToolConfigOverrideError",
+    "ToolInitOverrideError",
+    "ToolMetadata",
+    "ToolMetadataValidationError",
+    "ToolStatus",
+    "ToolValidationInfo",
+    "apply_authored_overrides",
+    "authored_tool_overrides_to_runtime",
     "default_worker_routed_tools",
     "deserialize_tool_validation_snapshot",
     "ensure_tool_registry_loaded",
@@ -740,6 +863,7 @@ expose = [
     "shared_storage_root",
     "stream_with_tool_execution_identity",
     "supports_tool_name_for_worker_scope",
+    "tool_execution_identity",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",
     "visible_state_roots_for_worker_key",
@@ -864,6 +988,7 @@ expose = [
     "stream_with_tool_execution_identity",
     "supports_tool_name_for_worker_scope",
     "tool_stays_local",
+    "tool_execution_identity",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",
     "visible_state_roots_for_worker_key",

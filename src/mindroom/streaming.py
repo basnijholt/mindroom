@@ -23,7 +23,7 @@ from mindroom.matrix.client import edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import is_sync_restart_cancel
-from mindroom.tool_system.events import (
+from mindroom.tool_system.runtime import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,

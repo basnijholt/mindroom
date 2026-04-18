@@ -12,7 +12,7 @@ from mindroom.agent_policy import (
     resolve_private_knowledge_base_agent,
 )
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.tool_system.worker_routing import (
+from mindroom.tool_system.runtime import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
     resolve_worker_execution_scope,
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.runtime import ToolExecutionIdentity, WorkerScope
 
 
 @dataclass(frozen=True)

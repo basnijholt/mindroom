@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
-from mindroom.tool_system.dependencies import ensure_tool_deps
-from mindroom.tool_system.worker_routing import (
+from mindroom.tool_system.runtime import (
     ResolvedWorkerTarget,
+    ensure_tool_deps,
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,
 )

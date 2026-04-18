@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.utils.log import log_info, log_warning
 
-from mindroom.tool_system.dependencies import ensure_optional_deps
+from mindroom.tool_system.runtime import ensure_optional_deps
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder

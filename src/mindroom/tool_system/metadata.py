@@ -14,9 +14,9 @@ from importlib import util as importlib_util
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import mindroom.tool_system.plugins as plugin_module
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
-from mindroom.tool_system import plugins as plugin_module
 from mindroom.tool_system.runtime import (
     ResolvedWorkerTarget,
     auto_install_tool_extra,

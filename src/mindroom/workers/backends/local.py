@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.runtime import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.manager import WorkerManager
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus

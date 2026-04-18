@@ -23,8 +23,8 @@ from mindroom.credentials import (
     load_scoped_credentials,
     load_worker_grantable_shared_credentials,
 )
-from mindroom.tool_system.metadata import export_tools_metadata, resolved_tool_metadata_for_runtime
-from mindroom.tool_system.worker_routing import (
+from mindroom.tool_system.catalog import export_tools_metadata, resolved_tool_metadata_for_runtime
+from mindroom.tool_system.runtime import (
     WorkerScope,
     build_worker_target_from_runtime_env,
     local_shared_credential_allowlist,
@@ -34,7 +34,7 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.runtime import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 

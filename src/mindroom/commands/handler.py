@@ -24,15 +24,13 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
-from mindroom.tool_system.runtime_context import (
+from mindroom.tool_system.extensions import resolve_skill_command_spec
+from mindroom.tool_system.runtime import (
     ToolDispatchContext,
-    runtime_context_from_dispatch_context,
-    tool_runtime_context,
-)
-from mindroom.tool_system.skills import resolve_skill_command_spec
-from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    runtime_context_from_dispatch_context,
     tool_execution_identity,
+    tool_runtime_context,
 )
 
 if TYPE_CHECKING:

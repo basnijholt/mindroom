@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mindroom.scheduling import ScheduledWorkflow
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.runtime import ToolRuntimeContext
 
 
 @dataclass(frozen=True)

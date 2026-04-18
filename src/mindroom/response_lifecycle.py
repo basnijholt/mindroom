@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.runtime import ToolRuntimeContext
 
     from .delivery_gateway import DeliveryResult
     from .response_runner import ResponseRequest, ResponseRunner

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
+from mindroom.tool_system.runtime import sandbox_proxy_config
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,

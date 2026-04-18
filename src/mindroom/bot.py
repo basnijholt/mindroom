@@ -53,8 +53,7 @@ from mindroom.post_response_effects import (
 )
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
-from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-from mindroom.tool_system.worker_routing import tool_execution_identity
+from mindroom.tool_system.runtime import ToolRuntimeSupport, tool_execution_identity
 
 from . import constants, interactive
 from .agents import (
@@ -141,7 +140,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
-    from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.runtime import ToolTraceEntry
 
 logger = get_logger(__name__)
 

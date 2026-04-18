@@ -10,7 +10,7 @@ from mindroom.config.agent import AgentConfig
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.tool_system.worker_routing import WorkerScope
+    from mindroom.tool_system.runtime import WorkerScope
 
 PrivateWorkerScope = Literal["user", "user_agent"]
 AgentPolicySource = Literal["private.per", "agent.worker_scope", "defaults.worker_scope", "unscoped"]

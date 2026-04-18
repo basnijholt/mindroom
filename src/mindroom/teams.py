@@ -61,7 +61,7 @@ from mindroom.team_runtime_resolution import (
     materialize_exact_requested_team_members,
     resolve_live_shared_agent_names,
 )
-from mindroom.tool_system.events import (
+from mindroom.tool_system.runtime import (
     StructuredStreamChunk,
     ToolTraceEntry,
     complete_pending_tool_block,
@@ -82,7 +82,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.runtime import ToolExecutionIdentity
 
 
 logger = get_logger(__name__)

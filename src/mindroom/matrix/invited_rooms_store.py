@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from mindroom.constants import ROUTER_AGENT_NAME, safe_replace
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import agent_state_root_path
+from mindroom.tool_system.runtime import agent_state_root_path
 
 if TYPE_CHECKING:
     from pathlib import Path

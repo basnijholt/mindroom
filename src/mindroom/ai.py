@@ -78,7 +78,7 @@ from mindroom.media_fallback import append_inline_media_fallback_prompt, should_
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_enhanced_prompt
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.tool_system.events import (
+from mindroom.tool_system.runtime import (
     complete_pending_tool_block,
     extract_tool_completed_info,
     format_tool_combined,
@@ -96,8 +96,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.matrix.client import ResolvedVisibleMessage
-    from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.runtime import ToolExecutionIdentity, ToolTraceEntry
 
 logger = get_logger(__name__)
 

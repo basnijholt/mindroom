@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from mindroom.mcp.toolkit import MindRoomMCPToolkit, require_mcp_server_manager
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.catalog import (
     _TOOL_REGISTRY,
     TOOL_METADATA,
     ConfigField,
@@ -15,6 +14,7 @@ from mindroom.tool_system.metadata import (
     ToolMetadata,
     ToolStatus,
 )
+from mindroom.tool_system.extensions import MindRoomMCPToolkit, require_mcp_server_manager
 
 if TYPE_CHECKING:
     from collections.abc import Callable

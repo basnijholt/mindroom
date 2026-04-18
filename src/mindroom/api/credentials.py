@@ -24,7 +24,7 @@ from mindroom.credentials import (
     load_worker_grantable_shared_credentials,
     validate_service_name,
 )
-from mindroom.tool_system.worker_routing import (
+from mindroom.tool_system.runtime import (
     ToolExecutionIdentity,
     WorkerScope,
     local_shared_credential_allowlist,

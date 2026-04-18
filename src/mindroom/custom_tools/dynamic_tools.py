@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
-from mindroom.tool_system.dynamic_toolkits import (
+from mindroom.tool_system.extensions import (
     DynamicToolkitConflictError,
     get_loaded_toolkits_for_session,
     merge_runtime_tool_configs,

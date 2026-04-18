@@ -59,7 +59,6 @@ from mindroom.matrix.users import (
 )
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
-from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import (
     reset_runtime_state,
@@ -68,8 +67,7 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling import set_scheduling_hook_registry
-from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.tool_system.extensions import bind_mcp_server_manager, clear_skill_cache, get_skill_snapshot, load_plugins
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config, load_config

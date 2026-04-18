@@ -10,7 +10,7 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     schedule_task,
 )
-from mindroom.tool_system.runtime_context import (
+from mindroom.tool_system.runtime import (
     build_scheduling_runtime_from_tool_runtime_context,
     get_tool_runtime_context,
 )

@@ -48,11 +48,12 @@ from mindroom.teams import (
     prepare_materialized_team_execution,
     resolve_configured_team,
 )
-from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
-from mindroom.tool_system.worker_routing import (
+from mindroom.tool_system.runtime import (
     ToolExecutionIdentity,
     WorkerScope,
     build_tool_execution_identity,
+    format_tool_completed_event,
+    format_tool_started_event,
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )

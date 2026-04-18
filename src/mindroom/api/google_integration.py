@@ -27,8 +27,7 @@ from mindroom.api.credentials import (
     resolve_request_credentials_target,
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.tool_system.dependencies import ensure_tool_deps
-from mindroom.tool_system.worker_routing import resolve_worker_target
+from mindroom.tool_system.runtime import ensure_tool_deps, resolve_worker_target
 
 if TYPE_CHECKING:
     from google.auth.transport.requests import Request as GoogleRequest

@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.runtime import worker_dir_name
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths

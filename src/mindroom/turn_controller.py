@@ -99,7 +99,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.response_runner import ResponseRunner
-    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
+    from mindroom.tool_system.runtime import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
 
 type DispatchPayloadBuilder = Callable[[MessageContext], Awaitable[DispatchPayload]]

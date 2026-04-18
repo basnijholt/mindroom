@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import CompactionOutcome
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.runtime import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 

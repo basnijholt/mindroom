@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionOutcome
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.runtime import ToolExecutionIdentity
 
 
 @dataclass(frozen=True)

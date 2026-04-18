@@ -60,13 +60,11 @@ from mindroom.streaming import (
 from mindroom.teams import TeamMode, select_model_for_team, team_response, team_response_stream
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.tool_system.runtime_context import (
+from mindroom.tool_system.runtime import (
     ToolDispatchContext,
     resolve_tool_runtime_hook_bindings,
-    runtime_context_from_dispatch_context,
-)
-from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
+    runtime_context_from_dispatch_context,
     stream_with_tool_execution_identity,
 )
 
@@ -100,8 +98,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.stop import StopManager
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.runtime import ToolExecutionIdentity, ToolRuntimeContext, ToolRuntimeSupport
 
 _CANCELLED_RESPONSE_TEXT = "**[Response cancelled by user]**"
 _ToolContextResult = TypeVar("_ToolContextResult")

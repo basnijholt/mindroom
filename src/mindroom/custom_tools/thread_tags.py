@@ -23,7 +23,7 @@ from mindroom.thread_tags import (
     remove_thread_tag,
     set_thread_tag,
 )
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

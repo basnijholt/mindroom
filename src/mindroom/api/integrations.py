@@ -16,11 +16,11 @@ from mindroom.api.credentials import (
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
-from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.runtime import ensure_tool_deps
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import WorkerScope
+    from mindroom.tool_system.runtime import WorkerScope
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 

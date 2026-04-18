@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from collections import deque
     from threading import Lock
 
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.runtime import ToolRuntimeContext
 
 
 def message_preview(body: object, max_length: int = 120) -> str:

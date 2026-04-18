@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.streaming import _StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
-    from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.runtime import ToolTraceEntry
 
 
 class SuppressedPlaceholderCleanupError(RuntimeError):

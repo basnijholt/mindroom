@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, worker_root_path
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.runtime import ResolvedWorkerTarget
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 _WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
@@ -82,6 +82,8 @@ class CredentialsManager:
 
     def for_worker(self, worker_key: str) -> CredentialsManager:
         """Return a credentials manager rooted in one worker's persistent state."""
+        from mindroom.tool_system.runtime import worker_root_path  # noqa: PLC0415
+
         worker_root = worker_root_path(self.storage_root, worker_key)
         worker_credentials_path = worker_root / "credentials"
         worker_shared_credentials_path = worker_root / _WORKER_SHARED_CREDENTIALS_DIRNAME
@@ -323,6 +325,8 @@ def _resolve_worker_credentials_manager(
         and current_storage_root == current_worker_root
     ):
         return credentials_manager
+
+    from mindroom.tool_system.runtime import worker_root_path  # noqa: PLC0415
 
     expected_worker_root = worker_root_path(credentials_manager.storage_root, worker_key)
     if current_storage_root == expected_worker_root:

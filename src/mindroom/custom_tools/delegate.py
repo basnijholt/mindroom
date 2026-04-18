@@ -17,7 +17,7 @@ from mindroom.agents import describe_agent
 from mindroom.ai import ai_response
 from mindroom.knowledge import KnowledgeManager, ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import (
+from mindroom.tool_system.runtime import (
     ToolRuntimeContext,
     get_tool_runtime_context,
     tool_runtime_context,
@@ -26,7 +26,7 @@ from mindroom.tool_system.runtime_context import (
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.runtime import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 

@@ -20,7 +20,7 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.matrix.client import send_file_message
-from mindroom.tool_system.runtime_context import (
+from mindroom.tool_system.runtime import (
     append_tool_runtime_attachment_id,
     attachment_id_available_in_tool_runtime_context,
     get_tool_runtime_context,
@@ -28,7 +28,7 @@ from mindroom.tool_system.runtime_context import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.runtime import ToolRuntimeContext
 
 
 @dataclass(frozen=True)

@@ -15,12 +15,12 @@ from mindroom.history.policy import manual_compaction_unavailable_message, resol
 from mindroom.history.runtime import open_scope_session_context
 from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, write_scope_state
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import (
+from mindroom.tool_system.runtime import (
+    ToolExecutionIdentity,
     ToolRuntimeContext,
     get_tool_runtime_context,
     resolve_current_session_id,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity  # noqa: TC001
 
 logger = get_logger(__name__)
 

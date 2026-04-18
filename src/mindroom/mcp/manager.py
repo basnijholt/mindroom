@@ -614,7 +614,7 @@ class MCPServerManager:
             return set(), set()
 
         from mindroom.mcp.registry import _MCP_TOOL_FACTORY_MARKER  # noqa: PLC0415
-        from mindroom.tool_system.metadata import (  # noqa: PLC0415
+        from mindroom.tool_system.catalog import (  # noqa: PLC0415
             _TOOL_REGISTRY,
             ensure_tool_registry_loaded,
             get_tool_by_name,
