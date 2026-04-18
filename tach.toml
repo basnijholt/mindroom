@@ -232,7 +232,6 @@ depends_on = [
     "mindroom.runtime_support",
     "mindroom.scheduling",
     "mindroom.tool_system.runtime",
-    "mindroom.tool_system.runtime_context",
     "mindroom.turn_controller",
 ]
 
@@ -245,7 +244,6 @@ depends_on = [
     "mindroom.scheduling",
     "mindroom.tool_system.extensions",
     "mindroom.tool_system.runtime",
-    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
