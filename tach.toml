@@ -622,6 +622,7 @@ depends_on = [
 path = "mindroom.history"
 depends_on = [
     "mindroom.history.compaction",
+    "mindroom.history.opportunistic_compaction",
     "mindroom.history.policy",
     "mindroom.history.runtime",
     "mindroom.history.storage",
@@ -696,6 +697,14 @@ depends_on = [
     "mindroom.model_loading",
     "mindroom.timing",
     "mindroom.token_budget",
+]
+
+[[modules]]
+path = "mindroom.history.opportunistic_compaction"
+depends_on = [
+    "mindroom.history.runtime",
+    "mindroom.history.types",
+    "mindroom.logging_config",
 ]
 
 [[modules]]
@@ -1819,6 +1828,7 @@ depends_on = [
 path = "mindroom.post_response_effects"
 depends_on = [
     "mindroom.delivery_gateway",
+    "mindroom.history",
     "mindroom.matrix.conversation_cache",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
@@ -2061,6 +2071,7 @@ from = ["mindroom.runtime_resolution"]
 expose = [
     "AIStreamChunk",
     "build_matrix_run_metadata",
+    "build_prepared_history_metadata_content",
     "ai_response",
     "stream_agent_response",
 ]
@@ -2583,6 +2594,7 @@ expose = [
     "close_team_runtime_state_dbs",
     "compute_prompt_token_breakdown",
     "create_scope_session_storage",
+    "enqueue_opportunistic_compactions",
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
@@ -2590,11 +2602,13 @@ expose = [
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
     "open_scope_session_context",
+    "post_response_compaction_check_has_pending_force",
     "prepare_bound_scope_history",
     "prepare_history_for_run",
     "prepare_scope_history",
     "read_scope_seen_event_ids",
     "read_scope_state",
+    "reprioritize_opportunistic_compactions",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
     "run_post_response_compaction_check",

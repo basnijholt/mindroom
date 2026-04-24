@@ -1,6 +1,12 @@
 """Persisted history compaction helpers."""
 
-from mindroom.history.compaction import compute_prompt_token_breakdown
+from mindroom.history.compaction import (
+    compute_prompt_token_breakdown,
+)
+from mindroom.history.opportunistic_compaction import (
+    enqueue_opportunistic_compactions,
+    reprioritize_opportunistic_compactions,
+)
 from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
 from mindroom.history.runtime import (
     PreparedScopeHistory,
@@ -15,6 +21,7 @@ from mindroom.history.runtime import (
     open_bound_scope_session_context,
     open_resolved_scope_session_context,
     open_scope_session_context,
+    post_response_compaction_check_has_pending_force,
     prepare_bound_scope_history,
     prepare_history_for_run,
     prepare_scope_history,
@@ -35,6 +42,7 @@ from mindroom.history.types import (
     CompactionLifecycleStart,
     CompactionLifecycleSuccess,
     CompactionOutcome,
+    CompactionReplyOutcome,
     HistoryPolicy,
     HistoryScope,
     HistoryScopeState,
@@ -52,6 +60,7 @@ __all__ = [
     "CompactionLifecycleStart",
     "CompactionLifecycleSuccess",
     "CompactionOutcome",
+    "CompactionReplyOutcome",
     "HistoryPolicy",
     "HistoryScope",
     "HistoryScopeState",
@@ -68,6 +77,7 @@ __all__ = [
     "close_team_runtime_state_dbs",
     "compute_prompt_token_breakdown",
     "create_scope_session_storage",
+    "enqueue_opportunistic_compactions",
     "estimate_preparation_static_tokens",
     "estimate_preparation_static_tokens_for_team",
     "finalize_history_preparation",
@@ -75,11 +85,13 @@ __all__ = [
     "open_bound_scope_session_context",
     "open_resolved_scope_session_context",
     "open_scope_session_context",
+    "post_response_compaction_check_has_pending_force",
     "prepare_bound_scope_history",
     "prepare_history_for_run",
     "prepare_scope_history",
     "read_scope_seen_event_ids",
     "read_scope_state",
+    "reprioritize_opportunistic_compactions",
     "resolve_bound_team_scope_context",
     "resolve_history_execution_plan",
     "run_post_response_compaction_check",

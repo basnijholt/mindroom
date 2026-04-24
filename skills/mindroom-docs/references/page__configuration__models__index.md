@@ -140,7 +140,8 @@ Destructive compaction is enabled by default through `defaults.compaction`.
 Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable destructive auto-compaction.
 Use `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model` to customize the policy.
 `threshold_tokens` and `threshold_percent` use the active runtime model window for replay budgeting.
-Manual `compact_context` still uses that active runtime window for the final replay-fit step on the next run, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
+Manual `compact_context` runs after the current reply finalizes when that turn completes successfully; if that cannot complete, MindRoom attempts it before the next reply.
+It still uses the active runtime window for the final replay-fit step, but destructive compaction itself can be available whenever an explicit `compaction.model` has its own `context_window`.
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
 Otherwise MindRoom re-checks the updated session after a successful visible reply and compacts immediately if the next reply would cross the threshold.

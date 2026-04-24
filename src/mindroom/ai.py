@@ -24,12 +24,14 @@ from agno.run.base import RunStatus
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import (
+    AI_RUN_METADATA_VERSION,
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
     empty_request_metric_totals,
 )
 from mindroom.cancellation import build_cancelled_error
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
@@ -89,6 +91,7 @@ __all__ = [
     "AIStreamChunk",
     "ai_response",
     "build_matrix_run_metadata",
+    "build_prepared_history_metadata_content",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -350,6 +353,75 @@ def _raise_agent_run_cancelled(reason: str | None) -> NoReturn:
     raise build_cancelled_error(reason)
 
 
+_build_ai_run_metadata_content = build_ai_run_metadata_content
+
+
+def _build_compaction_metadata_payload(prepared_history: PreparedHistoryState | None) -> dict[str, Any] | None:
+    """Serialize reply-level compaction diagnostics for Matrix run metadata."""
+    if prepared_history is None:
+        return None
+    decision = prepared_history.compaction_decision
+    payload: dict[str, Any] = {
+        "decision": decision.mode,
+        "outcome": prepared_history.compaction_reply_outcome,
+        "reason": decision.reason,
+    }
+    if decision.current_history_tokens is not None:
+        payload["current_history_tokens"] = decision.current_history_tokens
+    if decision.trigger_budget_tokens is not None:
+        payload["trigger_budget_tokens"] = decision.trigger_budget_tokens
+    if decision.hard_budget_tokens is not None:
+        payload["hard_budget_tokens"] = decision.hard_budget_tokens
+    if decision.fitted_replay_tokens is not None:
+        payload["fitted_replay_tokens"] = decision.fitted_replay_tokens
+    if prepared_history.replay_plan is not None:
+        payload["replay_plan"] = {
+            "mode": prepared_history.replay_plan.mode,
+            "estimated_tokens": prepared_history.replay_plan.estimated_tokens,
+        }
+    return payload
+
+
+def _note_prepared_history_timing(
+    pipeline_timing: DispatchPipelineTiming | None,
+    prepared_history: PreparedHistoryState,
+) -> None:
+    """Attach reply-level history metadata to the dispatch timing summary."""
+    if pipeline_timing is None:
+        return
+    decision = prepared_history.compaction_decision
+    pipeline_timing.note(
+        compaction_decision=decision.mode,
+        compaction_reply_outcome=prepared_history.compaction_reply_outcome,
+        compaction_reason=decision.reason,
+        compaction_current_history_tokens=decision.current_history_tokens,
+        compaction_trigger_budget_tokens=decision.trigger_budget_tokens,
+        compaction_hard_budget_tokens=decision.hard_budget_tokens,
+        compaction_fitted_replay_tokens=decision.fitted_replay_tokens,
+        prepared_context_tokens=prepared_history.prepared_context_tokens,
+        fitted_replay_tokens=(
+            prepared_history.replay_plan.estimated_tokens if prepared_history.replay_plan is not None else None
+        ),
+    )
+
+
+def build_prepared_history_metadata_content(prepared_history: PreparedHistoryState | None) -> dict[str, Any] | None:
+    """Build Matrix message metadata for prepared-context and compaction diagnostics."""
+    if prepared_history is None:
+        return None
+    payload: dict[str, Any] = {"version": AI_RUN_METADATA_VERSION}
+    if prepared_history.prepared_context_tokens is not None:
+        payload["prepared_context"] = {
+            "tokens": prepared_history.prepared_context_tokens,
+        }
+    compaction_payload = _build_compaction_metadata_payload(prepared_history)
+    if compaction_payload:
+        payload["compaction"] = compaction_payload
+    if len(payload) == 1:
+        return None
+    return {AI_RUN_METADATA_KEY: payload}
+
+
 def _normalized_string_list(values: object) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -598,6 +670,28 @@ def _prompt_current_sender_id(
     return user_id
 
 
+def _current_sender_id_kwargs(
+    user_id: str | None,
+    *,
+    include_openai_compat_guidance: bool,
+) -> dict[str, str | None]:
+    """Return prompt-preparation kwargs without Matrix sender metadata for OpenAI-compatible calls."""
+    if include_openai_compat_guidance:
+        return {"current_sender_id": None}
+    return {
+        "current_sender_id": _prompt_current_sender_id(
+            user_id,
+            include_openai_compat_guidance=include_openai_compat_guidance,
+        ),
+    }
+
+
+def _mark_pipeline_timing(pipeline_timing: DispatchPipelineTiming | None, label: str) -> None:
+    """Record one dispatch timing mark when turn-level timing is available."""
+    if pipeline_timing is not None:
+        pipeline_timing.mark(label)
+
+
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     agent_name: str,
@@ -623,6 +717,7 @@ async def _prepare_agent_and_prompt(
     include_openai_compat_guidance: bool = False,
     timing_scope: str | None = None,
     model_prompt: str | None = None,
+    pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedAgentRun:
     """Prepare agent and full prompt for AI processing.
 
@@ -630,6 +725,7 @@ async def _prepare_agent_and_prompt(
     """
     _assert_agent_target(agent_name, config)
     storage_path = runtime_paths.storage_root
+    _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
     prompt_parts = await build_memory_prompt_parts(
         prompt,
         agent_name,
@@ -644,6 +740,7 @@ async def _prepare_agent_and_prompt(
         model_prompt=model_prompt,
         prompt_parts=prompt_parts,
     )
+    _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
 
     runtime_model = config.resolve_runtime_model(
         entity_name=agent_name,
@@ -654,6 +751,7 @@ async def _prepare_agent_and_prompt(
     if resolved_session_id is None and scope_context is not None and scope_context.session is not None:
         resolved_session_id = scope_context.session.session_id
 
+    _mark_pipeline_timing(pipeline_timing, "agent_build_start")
     agent = create_agent(
         agent_name,
         config,
@@ -678,6 +776,7 @@ async def _prepare_agent_and_prompt(
             ),
         )
     _append_additional_context(agent, prompt_parts.session_preamble)
+    _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
     prepared_execution = await prepare_agent_execution_context(
         scope_context=scope_context,
@@ -694,6 +793,8 @@ async def _prepare_agent_and_prompt(
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=current_sender_id,
         timing_scope=timing_scope,
+        pipeline_timing=pipeline_timing,
+        execution_identity=execution_identity,
     )
     prepared_history = PreparedHistoryState(
         compaction_outcomes=prepared_execution.compaction_outcomes,
@@ -704,7 +805,10 @@ async def _prepare_agent_and_prompt(
             if prepared_execution.compaction_decision is not None
             else PreparedHistoryState().compaction_decision
         ),
+        compaction_reply_outcome=prepared_execution.compaction_reply_outcome,
+        prepared_context_tokens=prepared_execution.prepared_context_tokens,
         post_response_compaction_checks=list(prepared_execution.post_response_compaction_checks or []),
+        estimated_context_tokens=prepared_execution.estimated_context_tokens,
     )
     if prepared_execution.replay_plan is not None:
         apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
@@ -723,7 +827,10 @@ async def _prepare_agent_and_prompt(
             replay_plan=prepared_history.replay_plan,
             replays_persisted_history=prepared_history.replays_persisted_history,
             compaction_decision=prepared_history.compaction_decision,
+            compaction_reply_outcome=prepared_history.compaction_reply_outcome,
+            prepared_context_tokens=prepared_history.prepared_context_tokens,
             post_response_compaction_checks=prepared_history.post_response_compaction_checks,
+            estimated_context_tokens=prepared_history.estimated_context_tokens,
         )
         if compaction_outcomes_collector is not None:
             compaction_outcomes_collector.clear()
@@ -886,16 +993,18 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
-                    current_sender_id=_prompt_current_sender_id(
+                    **_current_sender_id_kwargs(
                         user_id,
                         include_openai_compat_guidance=include_openai_compat_guidance,
                     ),
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                     model_prompt=model_prompt,
+                    pipeline_timing=pipeline_timing,
                 )
                 if pipeline_timing is not None:
                     pipeline_timing.mark("history_ready")
+                    _note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
             except Exception as e:
                 logger.exception("Error preparing agent", agent=agent_name)
                 return get_user_friendly_error_message(e, agent_name)
@@ -1009,7 +1118,9 @@ async def ai_response(  # noqa: C901, PLR0912, PLR0915
                     model_provider=response.model_provider,
                     room_id=room_id,
                     metrics=response.metrics,
+                    context_input_tokens=prepared_run.prepared_history.estimated_context_tokens,
                     tool_count=len(response.tools) if response.tools is not None else 0,
+                    prepared_history=prepared_run.prepared_history,
                 )
                 if run_metadata:
                     run_metadata_collector.update(run_metadata)
@@ -1301,6 +1412,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     standalone_interrupted_replay_persisted = False
     unseen_event_ids: list[str] = []
     attempt_run_id = run_id
+    prepared_context_input_tokens: int | None = None
     state = _StreamingAttemptState()
 
     try:
@@ -1345,16 +1457,18 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
                     system_enrichment_items=system_enrichment_items,
-                    current_sender_id=_prompt_current_sender_id(
+                    **_current_sender_id_kwargs(
                         user_id,
                         include_openai_compat_guidance=include_openai_compat_guidance,
                     ),
                     include_openai_compat_guidance=include_openai_compat_guidance,
                     timing_scope=timing_scope,
                     model_prompt=model_prompt,
+                    pipeline_timing=pipeline_timing,
                 )
                 if pipeline_timing is not None:
                     pipeline_timing.mark("history_ready")
+                    _note_prepared_history_timing(pipeline_timing, prepared_run.prepared_history)
             except Exception as e:
                 logger.exception("Error preparing agent for streaming", agent=agent_name)
                 yield get_user_friendly_error_message(e, agent_name)
@@ -1362,6 +1476,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             agent = prepared_run.agent
             run_input = prepared_run.run_input
             unseen_event_ids = prepared_run.unseen_event_ids
+            prepared_context_input_tokens = prepared_run.prepared_history.estimated_context_tokens
             if agent.model is not None:
                 ai_runtime.install_queued_message_notice_hook(agent.model)
 
@@ -1490,10 +1605,12 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                                 model_provider=state.latest_model_provider,
                                 room_id=room_id,
                                 metrics=fallback_metrics,
+                                context_input_tokens=prepared_context_input_tokens,
                                 context_raw_input_tokens=state.latest_request_input_tokens,
                                 context_cache_read_tokens=state.latest_request_cache_read_tokens,
                                 context_cache_write_tokens=state.latest_request_cache_write_tokens,
                                 tool_count=state.observed_tool_calls,
+                                prepared_history=prepared_run.prepared_history,
                             )
                             if cancelled_metadata:
                                 run_metadata_collector.update(cancelled_metadata)
@@ -1536,6 +1653,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                         room_id=room_id,
                         metrics=state.completed_run_event.metrics if state.completed_run_event is not None else None,
                         metrics_fallback=fallback_metrics,
+                        context_input_tokens=prepared_context_input_tokens,
                         context_raw_input_tokens=state.latest_request_input_tokens,
                         context_cache_read_tokens=state.latest_request_cache_read_tokens,
                         context_cache_write_tokens=state.latest_request_cache_write_tokens,
@@ -1544,6 +1662,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
                             if state.completed_run_event is not None and state.completed_run_event.tools is not None
                             else state.observed_tool_calls
                         ),
+                        prepared_history=prepared_run.prepared_history,
                     )
                     if run_metadata:
                         run_metadata_collector.update(run_metadata)

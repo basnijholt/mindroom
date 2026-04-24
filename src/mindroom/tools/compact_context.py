@@ -18,7 +18,10 @@ register_builtin_tool_metadata(
     ToolMetadata(
         name="compact_context",
         display_name="Context Compaction",
-        description="Schedule context compaction for the next reply in the current conversation scope",
+        description=(
+            "Run context compaction after the current reply finalizes; "
+            "fallback attempts before the next reply if needed"
+        ),
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

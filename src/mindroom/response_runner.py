@@ -16,9 +16,18 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+)
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history import run_post_response_compaction_check
+from mindroom.history import (
+    HistoryScope,
+    reprioritize_opportunistic_compactions,
+    run_post_response_compaction_check,
+)
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -162,6 +171,18 @@ def _materialize_matrix_run_metadata(
     if matrix_run_metadata is None:
         return None
     return dict(matrix_run_metadata)
+
+
+def _ai_run_extra_content_from_metadata(
+    run_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the Matrix-visible AI run metadata subset from persisted run metadata."""
+    if run_metadata is None:
+        return None
+    ai_run_metadata = run_metadata.get(AI_RUN_METADATA_KEY)
+    if not isinstance(ai_run_metadata, dict):
+        return None
+    return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
 def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
@@ -918,6 +939,21 @@ class ResponseRunner:
         )
         session_scope = self.deps.state_writer.team_history_scope(list(team_request.team_agents))
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
+        try:
+            reprioritize_opportunistic_compactions(
+                agent_name=self.deps.agent_name,
+                session_id=session_id,
+                runtime_paths=self.deps.runtime_paths,
+                config=self.deps.runtime.config,
+                execution_identity=tool_dispatch.execution_identity,
+                scope=session_scope,
+            )
+        except Exception:
+            self.deps.logger.exception(
+                "Failed to reprioritize opportunistic compaction for active team session",
+                session_id=session_id,
+                scope=session_scope.key,
+            )
 
         def team_storage_factory() -> BaseDb:
             return self.deps.state_writer.create_storage(tool_dispatch.execution_identity, scope=session_scope)
@@ -1014,6 +1050,7 @@ class ResponseRunner:
                             system_enrichment_items=request.system_enrichment_items,
                             reason_prefix=team_request.reason_prefix,
                             matrix_run_metadata=matrix_run_metadata,
+                            pipeline_timing=request.pipeline_timing,
                             turn_recorder=team_turn_recorder,
                         )
 
@@ -1065,7 +1102,7 @@ class ResponseRunner:
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
                     tool_trace=None,
-                    extra_content=None,
+                    extra_content=_ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 )
@@ -1106,6 +1143,7 @@ class ResponseRunner:
                                     system_enrichment_items=request.system_enrichment_items,
                                     reason_prefix=team_request.reason_prefix,
                                     matrix_run_metadata=matrix_run_metadata,
+                                    pipeline_timing=request.pipeline_timing,
                                     turn_recorder=team_turn_recorder,
                                 )
 
@@ -1170,7 +1208,7 @@ class ResponseRunner:
                             response_envelope=resolved_response_envelope,
                             correlation_id=resolved_correlation_id,
                             tool_trace=None,
-                            extra_content=None,
+                            extra_content=_ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
                         ),
                     )
                 except asyncio.CancelledError:
@@ -1257,7 +1295,7 @@ class ResponseRunner:
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
                     tool_trace=error.tool_trace if show_tool_calls else None,
-                    extra_content=None,
+                    extra_content=_ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
@@ -1288,7 +1326,7 @@ class ResponseRunner:
                     response_envelope=resolved_response_envelope,
                     correlation_id=resolved_correlation_id,
                     tool_trace=None,
-                    extra_content=None,
+                    extra_content=_ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
                     existing_event_id=request.existing_event_id,
                     existing_event_is_placeholder=request.existing_event_is_placeholder,
                 ),
@@ -2051,6 +2089,21 @@ class ResponseRunner:
             active_session_id=session_id,
             execution_identity=execution_identity,
         )
+        try:
+            reprioritize_opportunistic_compactions(
+                agent_name=self.deps.agent_name,
+                session_id=session_id,
+                runtime_paths=self.deps.runtime_paths,
+                config=self.deps.runtime.config,
+                execution_identity=execution_identity,
+                scope=self.deps.state_writer.history_scope(),
+            )
+        except Exception:
+            self.deps.logger.exception(
+                "Failed to reprioritize opportunistic compaction for active session",
+                session_id=session_id,
+                agent=self.deps.agent_name,
+            )
 
         use_streaming = await should_use_streaming(
             self._client(),

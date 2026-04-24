@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import asyncio
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,10 +13,11 @@ from agno.models.message import Message
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom.ai import _prepare_agent_and_prompt
+from mindroom.ai import _build_ai_run_metadata_content, _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.compaction import (
@@ -24,31 +25,37 @@ from mindroom.history.compaction import (
     estimate_static_tokens,
     estimate_tool_definition_tokens,
 )
+from mindroom.history.opportunistic_compaction import (
+    drain_opportunistic_compactions,
+    enqueue_opportunistic_compactions,
+    queued_opportunistic_compaction_count,
+    reprioritize_opportunistic_compactions,
+    reset_opportunistic_compaction_queue_for_tests,
+)
 from mindroom.history.policy import classify_compaction_decision
+from mindroom.history.runtime import create_scope_session_storage, resolve_scope_storage_identity
 from mindroom.history.types import (
-    CompactionLifecycle,
-    CompactionLifecycleStart,
     CompactionOutcome,
+    HistoryScope,
     PostResponseCompactionCheck,
+    PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
+    ResolvedReplayPlan,
     _to_k,
 )
 from mindroom.memory import MemoryPromptParts
-from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
-    PostResponseEffectsSupport,
     ResponseOutcome,
     apply_post_response_effects,
 )
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delivery_gateway import DeliveryGateway
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -111,6 +118,7 @@ def _make_post_response_check(**overrides: object) -> PostResponseCompactionChec
         "session_id": "session-1",
         "scope_kind": "agent",
         "scope_id": "test_agent",
+        "storage_identity": "test-storage",
         "execution_plan": execution_plan,
         "active_context_window": 64_000,
     }
@@ -136,80 +144,6 @@ def _make_prepare_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
         runtime_paths,
     )
     return config, runtime_paths
-
-
-@pytest.mark.asyncio
-async def test_post_response_compaction_uses_matrix_lifecycle_adapter(tmp_path: Path) -> None:
-    """Post-response compaction should send lifecycle notices through the Matrix adapter."""
-    config, runtime_paths = _make_prepare_config(tmp_path)
-    sent_starts: list[dict[str, object]] = []
-
-    class FakeDeliveryGateway:
-        async def send_compaction_lifecycle_start(
-            self,
-            *,
-            target: MessageTarget,
-            reply_to_event_id: str,
-            event: CompactionLifecycleStart,
-        ) -> str:
-            sent_starts.append(
-                {
-                    "target": target,
-                    "reply_to_event_id": reply_to_event_id,
-                    "event": event,
-                },
-            )
-            return "$notice"
-
-    support = PostResponseEffectsSupport(
-        runtime=SimpleNamespace(config=config, client=None),
-        logger=MagicMock(),
-        runtime_paths=runtime_paths,
-        delivery_gateway=cast("DeliveryGateway", FakeDeliveryGateway()),
-        conversation_cache=MagicMock(),
-    )
-    check = _make_post_response_check()
-    target = MessageTarget.resolve(
-        room_id="!room:test",
-        thread_id="$thread",
-        reply_to_event_id="$response",
-    )
-
-    async def fake_run_compaction(**kwargs: object) -> None:
-        lifecycle = cast("CompactionLifecycle", kwargs["compaction_lifecycle"])
-        notice_id = await lifecycle.start(
-            CompactionLifecycleStart(
-                mode="auto",
-                session_id=check.session_id,
-                scope=check.scope.key,
-                summary_model=check.execution_plan.compaction_model_name,
-                before_tokens=14_000,
-                history_budget_tokens=check.execution_plan.replay_budget_tokens,
-                runs_before=8,
-            ),
-        )
-        assert notice_id == "$notice"
-
-    await support.run_post_response_compactions(
-        [check],
-        execution_identity=None,
-        target=target,
-        reply_to_event_id="$response",
-        run_compaction=fake_run_compaction,
-    )
-
-    assert len(sent_starts) == 1
-    assert sent_starts[0]["target"] == target
-    assert sent_starts[0]["reply_to_event_id"] == "$response"
-    assert sent_starts[0]["event"] == CompactionLifecycleStart(
-        mode="auto",
-        session_id="session-1",
-        scope="agent:test_agent",
-        summary_model="summary-model",
-        before_tokens=14_000,
-        history_budget_tokens=10_000,
-        runs_before=8,
-    )
 
 
 def test_compaction_policy_classifies_trigger_and_required_modes() -> None:
@@ -399,6 +333,56 @@ async def test_prepare_agent_and_prompt_omits_zero_breakdown_segments_in_notice(
     )
 
 
+def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_path: Path) -> None:
+    """Run metadata should expose prepared estimates without mixing them into provider usage."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    prepared_history = PreparedHistoryState(
+        compaction_decision=classify_compaction_decision(
+            plan=_make_post_response_check().execution_plan,
+            force_compact_before_next_run=False,
+            current_history_tokens=12_001,
+        ),
+        compaction_reply_outcome="opportunistic",
+        replay_plan=ResolvedReplayPlan(
+            mode="configured",
+            estimated_tokens=12_001,
+            add_history_to_context=True,
+        ),
+        prepared_context_tokens=20_000,
+    )
+
+    metadata = _build_ai_run_metadata_content(
+        agent_name="test_agent",
+        config=config,
+        runtime_paths=runtime_paths,
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="test-model",
+        model_provider="openai",
+        metrics={"input_tokens": 123, "output_tokens": 45, "total_tokens": 168},
+        prepared_history=prepared_history,
+    )
+
+    assert metadata is not None
+    payload = metadata[AI_RUN_METADATA_KEY]
+    assert payload["usage"]["input_tokens"] == 123
+    assert payload["prepared_context"]["tokens"] == 20_000
+    assert payload["compaction"] == {
+        "decision": "opportunistic",
+        "outcome": "opportunistic",
+        "reason": "over_trigger_fits_hard_budget",
+        "current_history_tokens": 12_001,
+        "trigger_budget_tokens": 10_000,
+        "hard_budget_tokens": 59_904,
+        "fitted_replay_tokens": 12_001,
+        "replay_plan": {
+            "mode": "configured",
+            "estimated_tokens": 12_001,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_post_response_effects_start_compaction_check_after_response_link_persistence() -> None:
     """Post-response compaction should use the final persisted session and preserve response linkage first."""
@@ -406,10 +390,10 @@ async def test_post_response_effects_start_compaction_check_after_response_link_
     events: list[str] = []
     persist_response_event_id = MagicMock(side_effect=lambda *_args: events.append("persist_response_event_id"))
 
-    async def _start_compaction(*_args: object) -> None:
+    def _start_compaction(*_args: object) -> None:
         events.append("start_compaction")
 
-    start_compaction = AsyncMock(side_effect=_start_compaction)
+    start_compaction = MagicMock(side_effect=_start_compaction)
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
@@ -431,7 +415,7 @@ async def test_post_response_effects_start_compaction_check_after_response_link_
     )
 
     persist_response_event_id.assert_called_once_with("run-1", "$response")
-    start_compaction.assert_awaited_once_with((check,), "$response")
+    start_compaction.assert_called_once_with((check,), "$response")
     assert events == ["persist_response_event_id", "start_compaction"]
 
 
@@ -439,7 +423,7 @@ async def test_post_response_effects_start_compaction_check_after_response_link_
 async def test_post_response_effects_skip_compaction_after_non_streaming_run_failure() -> None:
     """A delivered Matrix error reply from a failed non-streaming run must not compact."""
     check = _make_post_response_check()
-    start_compaction = AsyncMock()
+    start_compaction = MagicMock()
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
@@ -460,14 +444,14 @@ async def test_post_response_effects_skip_compaction_after_non_streaming_run_fai
         ),
     )
 
-    start_compaction.assert_not_awaited()
+    start_compaction.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_post_response_effects_skip_compaction_after_streaming_run_failure() -> None:
     """A delivered Matrix error reply from a failed streaming run must not compact."""
     check = _make_post_response_check()
-    start_compaction = AsyncMock()
+    start_compaction = MagicMock()
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
@@ -476,6 +460,358 @@ async def test_post_response_effects_skip_compaction_after_streaming_run_failure
             is_visible_response=True,
             final_visible_body="partial\n\nTeam execution failed.",
             delivery_kind="edited",
+        ),
+        ResponseOutcome(
+            response_run_id="run-1",
+            run_succeeded=False,
+            post_response_compaction_checks=(check,),
+        ),
+        PostResponseEffectsDeps(
+            logger=MagicMock(),
+            run_post_response_compaction=start_compaction,
+        ),
+    )
+
+    start_compaction.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_queue_replaces_pending_check(tmp_path: Path) -> None:
+    """Duplicate pending opportunistic work should keep only the newest payload."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    first = _make_post_response_check(active_context_window=64_000)
+    second = _make_post_response_check(active_context_window=32_000)
+    seen: list[PostResponseCompactionCheck] = []
+
+    async def fake_run(**kwargs: object) -> None:
+        seen.append(cast("PostResponseCompactionCheck", kwargs["check"]))
+
+    try:
+        with patch(
+            "mindroom.history.opportunistic_compaction.run_post_response_compaction_check",
+            new=AsyncMock(side_effect=fake_run),
+        ):
+            enqueue_opportunistic_compactions(
+                [first],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            )
+            enqueue_opportunistic_compactions(
+                [second],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            )
+            await drain_opportunistic_compactions()
+    finally:
+        await reset_opportunistic_compaction_queue_for_tests()
+
+    assert seen == [second]
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_queue_forwards_lifecycle(tmp_path: Path) -> None:
+    """Visible opportunistic compaction should report lifecycle updates."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    check = _make_post_response_check()
+    lifecycle = MagicMock()
+    seen: list[dict[str, object]] = []
+
+    async def fake_run(**kwargs: object) -> None:
+        seen.append(kwargs)
+
+    try:
+        with patch(
+            "mindroom.history.opportunistic_compaction.run_post_response_compaction_check",
+            new=AsyncMock(side_effect=fake_run),
+        ):
+            enqueue_opportunistic_compactions(
+                [check],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                compaction_lifecycle=lifecycle,
+            )
+            await drain_opportunistic_compactions()
+    finally:
+        await reset_opportunistic_compaction_queue_for_tests()
+
+    assert len(seen) == 1
+    assert seen[0]["check"] == check
+    assert seen[0]["compaction_lifecycle"] is lifecycle
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_queue_marks_running_dirty_for_one_rerun(tmp_path: Path) -> None:
+    """A duplicate enqueue while a key is running should trigger one follow-up pass."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    check = _make_post_response_check()
+    running = asyncio.Event()
+    release = asyncio.Event()
+    seen: list[PostResponseCompactionCheck] = []
+
+    async def fake_run(**kwargs: object) -> None:
+        seen.append(cast("PostResponseCompactionCheck", kwargs["check"]))
+        if len(seen) == 1:
+            running.set()
+            await release.wait()
+
+    try:
+        with patch(
+            "mindroom.history.opportunistic_compaction.run_post_response_compaction_check",
+            new=AsyncMock(side_effect=fake_run),
+        ):
+            enqueue_opportunistic_compactions(
+                [check],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            )
+            await asyncio.wait_for(running.wait(), timeout=1)
+            enqueue_opportunistic_compactions(
+                [check],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            )
+            release.set()
+            await drain_opportunistic_compactions()
+    finally:
+        await reset_opportunistic_compaction_queue_for_tests()
+
+    assert seen == [check, check]
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_queue_keeps_storage_identities_separate(tmp_path: Path) -> None:
+    """Storage identity is part of the queue key so private/session roots do not collapse."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    first = _make_post_response_check(storage_identity="storage-a")
+    second = _make_post_response_check(storage_identity="storage-b")
+    seen: list[str] = []
+
+    async def fake_run(**kwargs: object) -> None:
+        check = cast("PostResponseCompactionCheck", kwargs["check"])
+        seen.append(check.storage_identity)
+
+    try:
+        with patch(
+            "mindroom.history.opportunistic_compaction.run_post_response_compaction_check",
+            new=AsyncMock(side_effect=fake_run),
+        ):
+            enqueue_opportunistic_compactions(
+                [first, second],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            )
+            await drain_opportunistic_compactions()
+    finally:
+        await reset_opportunistic_compaction_queue_for_tests()
+
+    assert seen == ["storage-a", "storage-b"]
+
+
+def test_team_scope_storage_identity_includes_execution_identity(tmp_path: Path) -> None:
+    """Team history storage should not collapse distinct execution identities."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    scope = HistoryScope(kind="team", scope_id="super_team")
+    first_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id="$thread",
+        session_id="session-1",
+        tenant_id="tenant-a",
+        account_id=None,
+    )
+    second_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id="$thread",
+        session_id="session-1",
+        tenant_id="tenant-a",
+        account_id=None,
+    )
+
+    first_storage = create_scope_session_storage(
+        agent_name="general",
+        scope=scope,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=first_identity,
+    )
+    second_storage = create_scope_session_storage(
+        agent_name="general",
+        scope=scope,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=second_identity,
+    )
+    try:
+        assert resolve_scope_storage_identity(
+            agent_name="general",
+            scope=scope,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=first_identity,
+        ) != resolve_scope_storage_identity(
+            agent_name="general",
+            scope=scope,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=second_identity,
+        )
+        assert first_storage.db_file != second_storage.db_file
+    finally:
+        first_storage.close()
+        second_storage.close()
+
+
+@pytest.mark.asyncio
+async def test_reprioritize_opportunistic_compaction_holds_pending_active_session(tmp_path: Path) -> None:
+    """Active-session reprioritization should discard stale pending maintenance."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    storage_identity = resolve_scope_storage_identity(
+        agent_name="test_agent",
+        scope=_make_post_response_check().scope,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    check = _make_post_response_check(storage_identity=storage_identity)
+    seen: list[PostResponseCompactionCheck] = []
+
+    async def fake_run(**kwargs: object) -> None:
+        seen.append(cast("PostResponseCompactionCheck", kwargs["check"]))
+
+    try:
+        with patch(
+            "mindroom.history.opportunistic_compaction.run_post_response_compaction_check",
+            new=AsyncMock(side_effect=fake_run),
+        ):
+            enqueue_opportunistic_compactions(
+                [check],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            )
+            reprioritize_opportunistic_compactions(
+                agent_name="test_agent",
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                scope=check.scope,
+            )
+            await drain_opportunistic_compactions()
+    finally:
+        await reset_opportunistic_compaction_queue_for_tests()
+
+    assert seen == []
+    assert queued_opportunistic_compaction_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_reprioritize_opportunistic_compaction_holds_running_until_fresh_enqueue(tmp_path: Path) -> None:
+    """Active-session reprioritization should not rerun stale maintenance before final delivery."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+    storage_identity = resolve_scope_storage_identity(
+        agent_name="test_agent",
+        scope=_make_post_response_check().scope,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+    check = _make_post_response_check(storage_identity=storage_identity)
+    fresh_check = _make_post_response_check(storage_identity=storage_identity, active_context_window=32_000)
+    running = asyncio.Event()
+    release = asyncio.Event()
+    seen: list[PostResponseCompactionCheck] = []
+
+    async def fake_run(**kwargs: object) -> None:
+        seen.append(cast("PostResponseCompactionCheck", kwargs["check"]))
+        if len(seen) == 1:
+            running.set()
+            await release.wait()
+
+    try:
+        with patch(
+            "mindroom.history.opportunistic_compaction.run_post_response_compaction_check",
+            new=AsyncMock(side_effect=fake_run),
+        ):
+            enqueue_opportunistic_compactions(
+                [check],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            )
+            await asyncio.wait_for(running.wait(), timeout=1)
+            reprioritize_opportunistic_compactions(
+                agent_name="test_agent",
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                scope=check.scope,
+            )
+            release.set()
+            await drain_opportunistic_compactions()
+            assert seen == [check]
+            enqueue_opportunistic_compactions(
+                [fresh_check],
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+            )
+            await drain_opportunistic_compactions()
+    finally:
+        await reset_opportunistic_compaction_queue_for_tests()
+
+    assert seen == [check, fresh_check]
+
+
+@pytest.mark.asyncio
+async def test_reprioritize_opportunistic_compaction_skips_storage_when_queue_empty(tmp_path: Path) -> None:
+    """The active-turn hot path should not open history storage when there is no queued work."""
+    config, runtime_paths = _make_prepare_config(tmp_path)
+
+    try:
+        with patch(
+            "mindroom.history.opportunistic_compaction.resolve_scope_storage_identity",
+            side_effect=AssertionError("should not resolve storage"),
+        ):
+            reprioritize_opportunistic_compactions(
+                agent_name="test_agent",
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                scope=_make_post_response_check().scope,
+            )
+    finally:
+        await reset_opportunistic_compaction_queue_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_post_response_effects_skip_compaction_without_finalized_assistant_event() -> None:
+    """Pending manual compaction remains a next-turn fallback when no visible reply finalizes."""
+    check = _make_post_response_check()
+    start_compaction = AsyncMock()
+
+    await apply_post_response_effects(
+        FinalDeliveryOutcome(
+            terminal_status="cancelled",
+            event_id=None,
+            is_visible_response=False,
+            final_visible_body=None,
+            delivery_kind=None,
         ),
         ResponseOutcome(
             response_run_id="run-1",

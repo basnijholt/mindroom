@@ -23,8 +23,10 @@ import uvicorn
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge
 from agno.media import Image
+from agno.models.message import Message
 from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
+from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.team import TeamRunOutput
 
 import mindroom.tool_system.plugin_imports as plugin_module
@@ -66,10 +68,11 @@ from mindroom.delivery_gateway import (
     SendTextRequest,
 )
 from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.execution_preparation import PreparedExecutionContext
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import HandledTurnState
 from mindroom.history import CompactionLifecycleStart, CompactionOutcome
-from mindroom.history.types import HistoryScope, PostResponseCompactionCheck
+from mindroom.history.types import HistoryScope, PostResponseCompactionCheck, ResolvedHistoryExecutionPlan
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -2984,6 +2987,58 @@ class TestAgentBot:
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
 
     @pytest.mark.asyncio
+    async def test_generate_team_response_helper_reprioritizes_active_team_session(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Matrix team turns should reprioritize queued compaction for the active team session."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        _install_runtime_cache_support(bot)
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        matrix_ids = config.get_ids(runtime_paths_for(config))
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
+            patch("mindroom.response_runner.reprioritize_opportunistic_compactions") as mock_reprioritize,
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=AsyncMock(return_value="Team reply"),
+            ),
+        ):
+            await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$team-root",
+                thread_id=None,
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+                thread_history=[],
+                requester_user_id="@user:localhost",
+                payload=DispatchPayload(prompt="team prompt"),
+                response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+            )
+
+        mock_reprioritize.assert_called_once()
+        kwargs = mock_reprioritize.call_args.kwargs
+        assert kwargs["session_id"] == "!test:localhost"
+        assert kwargs["scope"].kind == "team"
+        assert kwargs["scope"].scope_id == "team_calculator+general"
+
+    @pytest.mark.asyncio
     async def test_generate_team_response_helper_preserves_enrichment_in_shared_team_session(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -5374,7 +5429,29 @@ class TestAgentBot:
     ) -> None:
         """A delivered non-streaming Matrix error reply should not be a successful run outcome."""
         captured_outcomes: list[ResponseOutcome] = []
-        check = cast("PostResponseCompactionCheck", MagicMock())
+        check = PostResponseCompactionCheck(
+            agent_name="general",
+            session_id="!test:localhost",
+            scope_kind="agent",
+            scope_id="general",
+            storage_identity="test-storage",
+            execution_plan=ResolvedHistoryExecutionPlan(
+                authored_compaction_config=True,
+                authored_compaction_enabled=True,
+                destructive_compaction_available=True,
+                explicit_compaction_model=False,
+                compaction_model_name="default",
+                compaction_context_window=64_000,
+                replay_window_tokens=64_000,
+                trigger_threshold_tokens=12_000,
+                reserve_tokens=4_096,
+                static_prompt_tokens=0,
+                replay_budget_tokens=10_000,
+                summary_input_budget_tokens=20_000,
+                hard_replay_budget_tokens=59_904,
+            ),
+            active_context_window=64_000,
+        )
 
         async def fake_ai_response(*_args: object, **kwargs: object) -> str:
             collector = kwargs["post_response_compaction_checks_collector"]
@@ -5950,6 +6027,137 @@ class TestAgentBot:
         send_kwargs = mock_send_streaming_response.await_args.kwargs
         assert send_kwargs["existing_event_id"] == "$placeholder"
         assert send_kwargs["adopt_existing_placeholder"] is True
+
+    @pytest.mark.asyncio
+    async def test_generate_team_response_helper_queues_compaction_after_event_stream_success(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Successful team event streams without final TeamRunOutput should enqueue post-response compaction."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+            response_function = response_kwargs["response_function"]
+            await response_function("$placeholder")
+            return "$placeholder"
+
+        async def fake_send_streaming_response(*args: object, **kwargs: object) -> StreamTransportOutcome:
+            response_stream = cast("AsyncGenerator[object, None]", args[7])
+            body_parts = [chunk.content if hasattr(chunk, "content") else str(chunk) async for chunk in response_stream]
+            visible_event_id_callback = cast(
+                "Callable[[str | None], None] | None",
+                kwargs.get("visible_event_id_callback"),
+            )
+            if visible_event_id_callback is not None:
+                visible_event_id_callback("$placeholder")
+            return _stream_outcome("$placeholder", "".join(body_parts))
+
+        async def fake_raw_team_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[object, None]:
+            yield TeamRunContentEvent(content="Consensus answer.")
+
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        _install_runtime_cache_support(bot)
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths,
+            knowledge_managers={},
+            agent_bots={"general": MagicMock(running=True)},
+        )
+        matrix_ids = config.get_ids(runtime_paths)
+        check = PostResponseCompactionCheck(
+            agent_name="general",
+            session_id="!test:localhost",
+            scope_kind="agent",
+            scope_id="general",
+            storage_identity="test-storage",
+            execution_plan=ResolvedHistoryExecutionPlan(
+                authored_compaction_config=True,
+                authored_compaction_enabled=True,
+                destructive_compaction_available=True,
+                explicit_compaction_model=False,
+                compaction_model_name="default",
+                compaction_context_window=64_000,
+                replay_window_tokens=64_000,
+                trigger_threshold_tokens=12_000,
+                reserve_tokens=4_096,
+                static_prompt_tokens=0,
+                replay_budget_tokens=10_000,
+                summary_input_budget_tokens=20_000,
+                hard_replay_budget_tokens=59_904,
+            ),
+            active_context_window=64_000,
+        )
+        fake_agent = MagicMock(name="GeneralAgent")
+        fake_agent.id = "general"
+        fake_agent.name = "GeneralAgent"
+        fake_agent.db = None
+        fake_agent.learning = None
+        fake_team = MagicMock()
+        fake_team.db = None
+        resolved_members = SimpleNamespace(
+            requested_agent_names=["general"],
+            agents=[fake_agent],
+            display_names=["GeneralAgent"],
+            materialized_agent_names={"general"},
+            failed_agent_names=[],
+        )
+        prepared_context = PreparedExecutionContext(
+            messages=(Message(role="user", content="Continue"),),
+            replay_plan=None,
+            unseen_event_ids=[],
+            replays_persisted_history=False,
+            compaction_outcomes=[],
+            post_response_compaction_checks=[check],
+        )
+
+        with (
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=True),
+                typing_indicator=noop_typing_indicator,
+            ),
+            patch.object(
+                ResponseRunner,
+                "run_cancellable_response",
+                new=AsyncMock(side_effect=run_cancellable_response),
+            ),
+            patch("mindroom.teams._materialize_team_members", return_value=resolved_members),
+            patch("mindroom.teams._create_team_instance", return_value=fake_team),
+            patch("mindroom.teams._team_tools_schema", return_value=[]),
+            patch("mindroom.teams.prepare_bound_team_run_context", new=AsyncMock(return_value=prepared_context)),
+            patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_raw_team_stream)),
+            patch(
+                "mindroom.delivery_gateway.send_streaming_response",
+                new=AsyncMock(side_effect=fake_send_streaming_response),
+            ),
+            patch("mindroom.post_response_effects.enqueue_opportunistic_compactions") as mock_enqueue,
+        ):
+            resolution = await bot._generate_team_response_helper(
+                room_id="!test:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread_root",
+                payload=DispatchPayload(prompt="Continue"),
+                team_agents=[matrix_ids["general"]],
+                team_mode="coordinate",
+                thread_history=[],
+                requester_user_id="@alice:localhost",
+                existing_event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                response_envelope=_hook_envelope(body="Continue", source_event_id="$event"),
+                correlation_id="corr-team-stream-compaction",
+            )
+
+        assert _handled_response_event_id(resolution) == "$placeholder"
+        mock_enqueue.assert_called_once()
+        assert mock_enqueue.call_args.args[0] == (check,)
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_keeps_streamed_visible_reply_when_before_response_suppresses(

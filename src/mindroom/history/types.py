@@ -9,6 +9,7 @@ _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
 _CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "opportunistic", "required"]
+CompactionReplyOutcome = Literal["none", "opportunistic", "required_success", "required_failed", "required_timeout"]
 _CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
 _CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
@@ -108,6 +109,7 @@ class PostResponseCompactionCheck:
     session_id: str
     scope_kind: _ScopeKind
     scope_id: str
+    storage_identity: str
     execution_plan: ResolvedHistoryExecutionPlan
     active_context_window: int | None
 
@@ -276,4 +278,7 @@ class PreparedHistoryState:
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
+    compaction_reply_outcome: CompactionReplyOutcome = "none"
+    prepared_context_tokens: int | None = None
     post_response_compaction_checks: list[PostResponseCompactionCheck] = field(default_factory=list)
+    estimated_context_tokens: int | None = None

@@ -37,14 +37,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.background import BackgroundTask
 
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
-from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
+from mindroom.ai import AIStreamChunk, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import prepare_bound_team_run_context, render_prepared_team_messages_text
 from mindroom.history import (
+    HistoryScope,
     ScopeSessionContext,
     close_team_runtime_state_dbs,
+    enqueue_opportunistic_compactions,
     open_bound_scope_session_context,
+    post_response_compaction_check_has_pending_force,
+    reprioritize_opportunistic_compactions,
     run_post_response_compaction_check,
 )
 from mindroom.knowledge import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
@@ -80,6 +84,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.knowledge.knowledge import Knowledge
+    from agno.models.message import Message
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
@@ -87,7 +92,7 @@ if TYPE_CHECKING:
     from starlette.types import Receive, Scope, Send
 
     from mindroom.config.main import Config
-    from mindroom.history import PostResponseCompactionCheck
+    from mindroom.history import CompactionOutcome, PostResponseCompactionCheck
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 logger = get_logger(__name__)
 
@@ -113,19 +118,19 @@ async def _run_openai_response_backgrounds(
     always_background: BackgroundTask | None,
 ) -> None:
     """Run completion-scoped and always-run OpenAI response backgrounds."""
-    background_error: BaseException | None = None
-    if completed and completion_background is not None:
-        try:
-            await completion_background()
-        except BaseException as error:
-            background_error = error
-
     finalizer_error: BaseException | None = None
     if always_background is not None:
         try:
             await always_background()
         except BaseException as error:
             finalizer_error = error
+
+    background_error: BaseException | None = None
+    if completed and completion_background is not None:
+        try:
+            await completion_background()
+        except BaseException as error:
+            background_error = error
 
     if response_error is not None:
         raise response_error
@@ -221,6 +226,51 @@ def _attach_openai_completion_lock_release(
         raise TypeError(msg)
     response.always_background = BackgroundTask(_release_openai_completion_lock, completion_lock)
     return response
+
+
+def _reprioritize_openai_active_session(
+    *,
+    agent_name: str,
+    session_id: str,
+    scope: HistoryScope,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> None:
+    try:
+        reprioritize_opportunistic_compactions(
+            agent_name=agent_name,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            scope=scope,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to reprioritize OpenAI-compatible opportunistic compaction for active session",
+            agent=agent_name,
+            session_id=session_id,
+            scope=scope.key,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedOpenAITeamPrompt:
+    """Prepared team prompt plus the run metadata that must reach Agno."""
+
+    prompt: str
+    run_metadata: dict[str, object] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedOpenAIMaterializedTeamExecution:
+    """Prepared team execution state needed by the OpenAI-compatible API."""
+
+    messages: tuple[Message, ...]
+    run_metadata: dict[str, object] | None
+    unseen_event_ids: list[str]
+    post_response_compaction_checks: list[PostResponseCompactionCheck] | None = None
 
 
 def _load_config(
@@ -906,6 +956,14 @@ async def chat_completions(  # noqa: C901, PLR0912
         # Team execution path
         if agent_name.startswith(_TEAM_MODEL_PREFIX):
             team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
+            _reprioritize_openai_active_session(
+                agent_name=team_name,
+                session_id=session_id,
+                scope=HistoryScope(kind="team", scope_id=team_name),
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+            )
             if req.stream:
                 response: JSONResponse | StreamingResponse = await _stream_team_completion(
                     team_name,
@@ -934,6 +992,14 @@ async def chat_completions(  # noqa: C901, PLR0912
                         refresh_scheduler=knowledge_refresh_scheduler,
                     )
         else:
+            _reprioritize_openai_active_session(
+                agent_name=agent_name,
+                session_id=session_id,
+                scope=HistoryScope(kind="agent", scope_id=agent_name),
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+            )
             # Resolve knowledge base for this agent
             try:
                 knowledge_resolution = resolve_agent_knowledge_access(
@@ -1336,8 +1402,27 @@ async def _run_openai_post_response_compaction_checks(
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
 ) -> None:
-    """Run post-response compaction for OpenAI-compatible sessions without Matrix notices."""
+    """Run manual OpenAI-compatible compaction directly and queue opportunistic checks."""
+    forced_checks: list[PostResponseCompactionCheck] = []
+    opportunistic_checks: list[PostResponseCompactionCheck] = []
     for check in checks:
+        if post_response_compaction_check_has_pending_force(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+        ):
+            forced_checks.append(check)
+        else:
+            opportunistic_checks.append(check)
+
+    enqueue_opportunistic_compactions(
+        tuple(opportunistic_checks),
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+    )
+    for check in forced_checks:
         try:
             await run_post_response_compaction_check(
                 check=check,
@@ -1452,6 +1537,126 @@ def _is_failed_team_output(response: TeamRunOutput | RunOutput) -> bool:
     return is_errored_run_output(response) or is_cancelled_run_output(response)
 
 
+def _is_queued_notice_message(message: Message) -> bool:
+    provider_data = message.provider_data
+    return isinstance(provider_data, dict) and provider_data.get("mindroom_queued_message_notice") is True
+
+
+def _scrub_queued_notice_team_scope_context(scope_context: ScopeSessionContext | None) -> None:
+    """Strip stale queued-message notices from a loaded team session before replay."""
+    if scope_context is None or scope_context.session is None:
+        return
+    changed = False
+    for run in scope_context.session.runs or []:
+        if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.messages:
+            continue
+        filtered_messages = [message for message in run.messages if not _is_queued_notice_message(message)]
+        if len(filtered_messages) == len(run.messages):
+            continue
+        run.messages = filtered_messages
+        changed = True
+    if changed:
+        scope_context.storage.upsert_session(scope_context.session)
+
+
+async def prepare_materialized_team_execution(
+    *,
+    scope_context: ScopeSessionContext | None,
+    agents: list[Agent],
+    team: Team,
+    message: str,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    active_model_name: str | None,
+    reply_to_event_id: str | None,
+    active_event_ids: frozenset[str],
+    response_sender_id: str | None,
+    current_sender_id: str | None,
+    compaction_outcomes_collector: list[CompactionOutcome] | None,
+    configured_team_name: str | None,
+    execution_identity: ToolExecutionIdentity | None = None,
+    matrix_run_metadata: dict[str, object] | None = None,
+    system_enrichment_items: tuple[object, ...] = (),
+) -> _PreparedOpenAIMaterializedTeamExecution:
+    """Prepare one team run using only public execution-preparation interfaces."""
+    del system_enrichment_items
+    _scrub_queued_notice_team_scope_context(scope_context)
+    prepared_execution = await prepare_bound_team_run_context(
+        scope_context=scope_context,
+        agents=agents,
+        team=team,
+        prompt=message,
+        thread_history=thread_history,
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name=configured_team_name,
+        active_model_name=active_model_name,
+        active_context_window=config.resolve_runtime_model(
+            entity_name=configured_team_name,
+            active_model_name=active_model_name,
+        ).context_window,
+        reply_to_event_id=reply_to_event_id,
+        active_event_ids=active_event_ids,
+        response_sender_id=response_sender_id,
+        current_sender_id=current_sender_id,
+        execution_identity=execution_identity,
+        compaction_outcomes_collector=compaction_outcomes_collector,
+    )
+    run_metadata = build_matrix_run_metadata(
+        reply_to_event_id,
+        prepared_execution.unseen_event_ids,
+        extra_metadata=matrix_run_metadata,
+    )
+    return _PreparedOpenAIMaterializedTeamExecution(
+        messages=prepared_execution.messages,
+        run_metadata=cast("dict[str, object] | None", run_metadata),
+        unseen_event_ids=prepared_execution.unseen_event_ids,
+        post_response_compaction_checks=prepared_execution.post_response_compaction_checks,
+    )
+
+
+async def _prepare_openai_team_prompt(
+    *,
+    scope_context: ScopeSessionContext | None,
+    team_name: str,
+    agents: list[Agent],
+    team: Team,
+    prompt: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> _PreparedOpenAITeamPrompt:
+    """Prepare the final prompt for one OpenAI-compatible team run."""
+    prepared_execution = await prepare_materialized_team_execution(
+        scope_context=scope_context,
+        agents=agents,
+        team=team,
+        message=prompt,
+        thread_history=thread_history,
+        config=config,
+        runtime_paths=runtime_paths,
+        active_model_name=config.resolve_runtime_model(entity_name=team_name).model_name,
+        reply_to_event_id=None,
+        active_event_ids=frozenset(),
+        response_sender_id=None,
+        current_sender_id=None,
+        compaction_outcomes_collector=None,
+        configured_team_name=team_name,
+        execution_identity=execution_identity,
+        matrix_run_metadata=None,
+        system_enrichment_items=(),
+    )
+    if post_response_compaction_checks_collector is not None:
+        post_response_compaction_checks_collector.extend(prepared_execution.post_response_compaction_checks or [])
+    return _PreparedOpenAITeamPrompt(
+        prompt=render_prepared_team_messages_text(prepared_execution.messages),
+        run_metadata=prepared_execution.run_metadata,
+    )
+
+
 async def _prepare_openai_team_run_input(
     *,
     scope_context: ScopeSessionContext | None,
@@ -1463,28 +1668,22 @@ async def _prepare_openai_team_run_input(
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     post_response_compaction_checks_collector: list[PostResponseCompactionCheck] | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> str:
     """Prepare the canonical prompt text for one OpenAI-compatible team run."""
-    prepared_execution = await prepare_bound_team_run_context(
+    prepared_prompt = await _prepare_openai_team_prompt(
         scope_context=scope_context,
+        team_name=team_name,
         agents=agents,
         team=team,
         prompt=prompt,
-        thread_history=thread_history,
         config=config,
         runtime_paths=runtime_paths,
-        entity_name=team_name,
-        active_model_name=config.resolve_runtime_model(entity_name=team_name).model_name,
-        active_context_window=config.resolve_runtime_model(entity_name=team_name).context_window,
-        reply_to_event_id=None,
-        active_event_ids=frozenset(),
-        response_sender_id=None,
-        current_sender_id=None,
-        compaction_outcomes_collector=None,
+        thread_history=thread_history,
+        post_response_compaction_checks_collector=post_response_compaction_checks_collector,
+        execution_identity=execution_identity,
     )
-    if post_response_compaction_checks_collector is not None:
-        post_response_compaction_checks_collector.extend(prepared_execution.post_response_compaction_checks or [])
-    return render_prepared_team_messages_text(prepared_execution.messages)
+    return prepared_prompt.prompt
 
 
 async def _non_stream_team_completion(
@@ -1552,6 +1751,7 @@ async def _non_stream_team_completion(
                     runtime_paths=runtime_paths,
                     thread_history=thread_history,
                     post_response_compaction_checks_collector=post_response_compaction_checks,
+                    execution_identity=execution_identity,
                 )
             except Exception:
                 logger.exception("Team member preparation failed", team=team_name)
@@ -1686,6 +1886,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                 runtime_paths=runtime_paths,
                 thread_history=thread_history,
                 post_response_compaction_checks_collector=post_response_compaction_checks,
+                execution_identity=execution_identity,
             )
         except Exception:
             logger.exception("Team member preparation failed", team=team_name)

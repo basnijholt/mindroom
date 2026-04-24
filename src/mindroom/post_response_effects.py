@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.delivery_gateway import MatrixCompactionLifecycle
+from mindroom.history import enqueue_opportunistic_compactions, post_response_compaction_check_has_pending_force
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
@@ -78,7 +80,7 @@ class PostResponseEffectsDeps:
         | None
     ) = None
     queue_memory_persistence: Callable[[], None] | None = None
-    run_post_response_compaction: Callable[[Sequence[PostResponseCompactionCheck], str], Awaitable[None]] | None = None
+    run_post_response_compaction: Callable[[Sequence[PostResponseCompactionCheck], str], object] | None = None
     persist_response_event_id: Callable[[str, str], None] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, int | None], None] | None = None
@@ -182,8 +184,35 @@ class PostResponseEffectsSupport:
         reply_to_event_id: str,
         run_compaction: PostResponseCompactionRunner,
     ) -> None:
-        """Run immediate post-response compaction checks before the turn fully completes."""
+        """Run manual post-response compaction now and queue opportunistic maintenance."""
+        forced_checks: list[PostResponseCompactionCheck] = []
+        opportunistic_checks: list[PostResponseCompactionCheck] = []
         for check in checks:
+            if post_response_compaction_check_has_pending_force(
+                check=check,
+                runtime_paths=self.runtime_paths,
+                config=self.runtime.config,
+                execution_identity=execution_identity,
+            ):
+                forced_checks.append(check)
+            else:
+                opportunistic_checks.append(check)
+
+        enqueue_opportunistic_compactions(
+            tuple(opportunistic_checks),
+            runtime_paths=self.runtime_paths,
+            config=self.runtime.config,
+            execution_identity=execution_identity,
+            compaction_lifecycle=MatrixCompactionLifecycle(
+                delivery_gateway=self.delivery_gateway,
+                target=target,
+                reply_to_event_id=reply_to_event_id,
+            )
+            if opportunistic_checks
+            else None,
+        )
+
+        for check in forced_checks:
             compaction_lifecycle = MatrixCompactionLifecycle(
                 delivery_gateway=self.delivery_gateway,
                 target=target,
@@ -223,34 +252,51 @@ class PostResponseEffectsSupport:
                 agent_name=interactive_agent_name,
             )
 
-        return PostResponseEffectsDeps(
-            logger=self.logger,
-            register_interactive=register_interactive,
-            queue_memory_persistence=queue_memory_persistence,
-            run_post_response_compaction=(
-                (
-                    lambda checks, response_event_id: self.run_post_response_compactions(
-                        checks,
-                        execution_identity=execution_identity,
+        async def run_compaction(
+            checks: Sequence[PostResponseCompactionCheck],
+            response_event_id: str,
+        ) -> None:
+            if run_post_response_compaction is None:
+                enqueue_opportunistic_compactions(
+                    checks,
+                    runtime_paths=self.runtime_paths,
+                    config=self.runtime.config,
+                    execution_identity=execution_identity,
+                    compaction_lifecycle=MatrixCompactionLifecycle(
+                        delivery_gateway=self.delivery_gateway,
                         target=MessageTarget.resolve(
                             room_id=room_id,
                             thread_id=thread_id,
                             reply_to_event_id=response_event_id,
                         ),
                         reply_to_event_id=response_event_id,
-                        run_compaction=run_post_response_compaction,
-                    )
+                    ),
                 )
-                if run_post_response_compaction is not None
-                else None
-            ),
+                return
+            await self.run_post_response_compactions(
+                checks,
+                execution_identity=execution_identity,
+                target=MessageTarget.resolve(
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    reply_to_event_id=response_event_id,
+                ),
+                reply_to_event_id=response_event_id,
+                run_compaction=run_post_response_compaction,
+            )
+
+        return PostResponseEffectsDeps(
+            logger=self.logger,
+            register_interactive=register_interactive,
+            queue_memory_persistence=queue_memory_persistence,
+            run_post_response_compaction=run_compaction,
             persist_response_event_id=persist_response_event_id,
             should_queue_thread_summary=self.should_queue_thread_summary,
             queue_thread_summary=self.queue_thread_summary,
         )
 
 
-async def apply_post_response_effects(
+async def apply_post_response_effects(  # noqa: C901
     final_delivery_outcome: FinalDeliveryOutcome,
     outcome: ResponseOutcome,
     deps: PostResponseEffectsDeps,
@@ -290,19 +336,6 @@ async def apply_post_response_effects(
                 interactive_target_is_none=outcome.interactive_target is None,
             )
 
-    if deps.queue_memory_persistence is not None:
-        try:
-            deps.queue_memory_persistence()
-        except Exception:
-            deps.logger.exception(
-                "Failed to queue memory persistence after response",
-                session_id=outcome.session_id,
-                room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
-                thread_id=(
-                    outcome.interactive_target.resolved_thread_id if outcome.interactive_target is not None else None
-                ),
-            )
-
     if (
         outcome.response_run_id is not None
         and response_event_id is not None
@@ -318,6 +351,19 @@ async def apply_post_response_effects(
                 response_event_id=response_event_id,
             )
 
+    if deps.queue_memory_persistence is not None:
+        try:
+            deps.queue_memory_persistence()
+        except Exception:
+            deps.logger.exception(
+                "Failed to queue memory persistence after response",
+                session_id=outcome.session_id,
+                room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
+                thread_id=(
+                    outcome.interactive_target.resolved_thread_id if outcome.interactive_target is not None else None
+                ),
+            )
+
     if (
         response_event_id is not None
         and final_delivery_outcome.terminal_status == "completed"
@@ -327,10 +373,15 @@ async def apply_post_response_effects(
         and deps.run_post_response_compaction is not None
     ):
         try:
-            await deps.run_post_response_compaction(outcome.post_response_compaction_checks, response_event_id)
+            maybe_awaitable = deps.run_post_response_compaction(
+                outcome.post_response_compaction_checks,
+                response_event_id,
+            )
+            if inspect.isawaitable(maybe_awaitable):
+                await maybe_awaitable
         except Exception:
             deps.logger.exception(
-                "Failed to run post-response compaction",
+                "Failed to queue post-response compaction",
                 session_id=outcome.session_id,
                 room_id=outcome.interactive_target.room_id if outcome.interactive_target is not None else None,
                 thread_id=(

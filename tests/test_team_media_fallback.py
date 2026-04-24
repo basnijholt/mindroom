@@ -31,7 +31,7 @@ from mindroom.ai_runtime import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.execution_preparation import (
     PreparedExecutionContext,
     ThreadHistoryRenderLimits,
@@ -41,6 +41,7 @@ from mindroom.history.interrupted_replay import render_interrupted_replay_conten
 from mindroom.history.runtime import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import CompactionDecision, CompactionReplyOutcome
 from mindroom.knowledge import KnowledgeResolution
 from mindroom.matrix.identity import MatrixID
 from mindroom.media_inputs import MediaInputs
@@ -58,6 +59,7 @@ from mindroom.teams import (
     team_response,
     team_response_stream,
 )
+from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 
@@ -99,6 +101,9 @@ def _prepared_team_execution_context(
     replays_persisted_history: bool = False,
     unseen_event_ids: list[str] | None = None,
     context_messages: tuple[Message, ...] = (),
+    compaction_decision: CompactionDecision | None = None,
+    compaction_reply_outcome: CompactionReplyOutcome = "none",
+    prepared_context_tokens: int | None = None,
 ) -> PreparedExecutionContext:
     return PreparedExecutionContext(
         messages=(*context_messages, Message(role="user", content=final_prompt)),
@@ -106,6 +111,9 @@ def _prepared_team_execution_context(
         unseen_event_ids=unseen_event_ids or [],
         replays_persisted_history=replays_persisted_history,
         compaction_outcomes=[],
+        compaction_decision=compaction_decision,
+        compaction_reply_outcome=compaction_reply_outcome,
+        prepared_context_tokens=prepared_context_tokens,
     )
 
 
@@ -877,6 +885,69 @@ async def test_prepare_materialized_team_execution_forwards_explicit_thread_hist
                 missing_sender_label="Unknown",
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_prepare_materialized_team_execution_carries_compaction_metadata_and_timing() -> None:
+    """Team preparation should preserve prepared-context metadata and timing diagnostics."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    fake_agent = _make_test_agent("GeneralAgent")
+    mock_team = _make_test_team(name="General Team")
+    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room:localhost")
+    decision = CompactionDecision(
+        mode="opportunistic",
+        reason="over_trigger_fits_hard_budget",
+        current_history_tokens=12_001,
+        trigger_budget_tokens=10_000,
+        hard_budget_tokens=20_000,
+        fitted_replay_tokens=9_000,
+    )
+
+    async def fake_prepare_bound_team_run_context(**kwargs: object) -> PreparedExecutionContext:
+        assert kwargs["pipeline_timing"] is timing
+        return _prepared_team_execution_context(
+            final_prompt="Analyze this.",
+            compaction_decision=decision,
+            compaction_reply_outcome="opportunistic",
+            prepared_context_tokens=12_345,
+        )
+
+    with patch(
+        "mindroom.teams.prepare_bound_team_run_context",
+        new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
+    ):
+        prepared = await _prepare_materialized_team_execution(
+            scope_context=None,
+            agents=[fake_agent],
+            team=mock_team,
+            message="Analyze this.",
+            thread_history=[],
+            config=config,
+            runtime_paths=runtime_paths,
+            active_model_name=None,
+            reply_to_event_id="$event",
+            active_event_ids=frozenset(),
+            response_sender_id=None,
+            current_sender_id=None,
+            room_id="!room:localhost",
+            thread_id=None,
+            requester_id=None,
+            correlation_id="correlation-id",
+            compaction_outcomes_collector=None,
+            configured_team_name=None,
+            pipeline_timing=timing,
+        )
+
+    assert prepared.run_extra_content is not None
+    ai_metadata = prepared.run_extra_content[AI_RUN_METADATA_KEY]
+    assert ai_metadata["prepared_context"] == {"tokens": 12_345}
+    assert ai_metadata["compaction"]["decision"] == "opportunistic"
+    assert ai_metadata["compaction"]["outcome"] == "opportunistic"
+    assert prepared.run_metadata is not None
+    assert prepared.run_metadata[AI_RUN_METADATA_KEY] == ai_metadata
+    assert timing.metadata["compaction_decision"] == "opportunistic"
+    assert timing.metadata["prepared_context_tokens"] == 12_345
 
 
 @pytest.mark.asyncio
@@ -2266,6 +2337,73 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
     assert isinstance(chunks[0], str)
     assert chunks[0].startswith("🤝 **Team Response** (GeneralAgent):")
     assert "Fallback consensus" in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_marks_successful_event_stream_completed() -> None:
+    """A successful event stream without final TeamRunOutput should complete the turn recorder."""
+    config = _build_test_config()
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock(running=True)}
+
+    fake_agent = _make_test_agent("GeneralAgent")
+    team_members = ResolvedExactTeamMembers(
+        requested_agent_names=["general"],
+        agents=[fake_agent],
+        display_names=["GeneralAgent"],
+        materialized_agent_names={"general"},
+        failed_agent_names=[],
+    )
+
+    async def fake_stream_raw(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield AgentRunContentEvent(agent_name="GeneralAgent", content="Member answer.")
+        yield TeamRunContentEvent(content="Consensus answer.")
+
+    team_agent_ids = [
+        MatrixID.from_agent(
+            "general",
+            config.get_domain(runtime_paths),
+            runtime_paths,
+        ),
+    ]
+    recorder = TurnRecorder(user_message="Analyze this.")
+
+    with (
+        patch("mindroom.teams._materialize_team_members", return_value=team_members),
+        patch("mindroom.teams._create_team_instance", return_value=_make_test_team()),
+        patch(
+            "mindroom.teams.prepare_bound_team_run_context",
+            new=AsyncMock(return_value=_prepared_team_execution_context(final_prompt="Analyze this.")),
+        ),
+        patch("mindroom.teams._team_response_stream_raw", new=AsyncMock(side_effect=fake_stream_raw)),
+    ):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team_agent_ids,
+                message="Analyze this.",
+                turn_recorder=recorder,
+                orchestrator=orchestrator,
+                execution_identity=None,
+                mode=TeamMode.COORDINATE,
+                session_id="session-team-stream",
+                run_id="run-456",
+                show_tool_calls=False,
+            )
+        ]
+
+    rendered_chunks = [chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks]
+    assert recorder.outcome == "completed"
+    assert recorder.assistant_text.startswith("🤝 **Team Response** (GeneralAgent):")
+    assert "**GeneralAgent**: Member answer." in recorder.assistant_text
+    assert "**Team Consensus**" in recorder.assistant_text
+    assert "Consensus answer." in recorder.assistant_text
+    assert recorder.completed_tools == []
+    assert any("Consensus answer." in chunk for chunk in rendered_chunks)
 
 
 @pytest.mark.asyncio

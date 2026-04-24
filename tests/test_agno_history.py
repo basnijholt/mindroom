@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Iterator
+from collections.abc import Coroutine, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +39,12 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, RuntimePaths, resolve_runtime_paths
+from mindroom.constants import (
+    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    MINDROOM_COMPACTION_METADATA_KEY,
+    RuntimePaths,
+    resolve_runtime_paths,
+)
 from mindroom.execution_preparation import PreparedExecutionContext, build_matrix_prompt_with_thread_history
 from mindroom.history import PreparedHistoryState, prepare_history_for_run
 from mindroom.history.compaction import (
@@ -48,6 +53,7 @@ from mindroom.history.compaction import (
     _generate_compaction_summary,
     _rewrite_working_session_for_compaction,
     _strip_stale_anthropic_replay_fields,
+    effective_summary_input_budget_tokens,
     estimate_agent_static_tokens,
     estimate_history_messages_tokens,
     estimate_prompt_visible_history_tokens,
@@ -68,6 +74,7 @@ from mindroom.history.runtime import (
     run_post_response_compaction_check,
 )
 from mindroom.history.storage import (
+    add_pending_force_compaction_scope,
     read_scope_seen_event_ids,
     read_scope_state,
     update_scope_seen_event_ids,
@@ -101,6 +108,8 @@ from mindroom.thread_utils import create_session_id
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_conversation_cache_mock, make_event_cache_mock, make_visible_message
+
+_DEFAULT_TEST_COMPACTION = CompactionConfig()
 
 
 @dataclass
@@ -212,6 +221,7 @@ def _make_config(
     num_history_runs: int | None = None,
     num_history_messages: int | None = None,
     compaction: CompactionOverrideConfig | None = None,
+    defaults_compaction: CompactionConfig | None = _DEFAULT_TEST_COMPACTION,
     context_window: int | None = 48_000,
     models: dict[str, ModelConfig] | None = None,
 ) -> tuple[Config, RuntimePaths]:
@@ -226,7 +236,7 @@ def _make_config(
                     compaction=compaction,
                 ),
             },
-            defaults=DefaultsConfig(tools=[]),
+            defaults=DefaultsConfig(tools=[], compaction=defaults_compaction),
             models=(
                 models
                 if models is not None
@@ -769,6 +779,7 @@ async def test_prepare_history_for_run_records_post_response_compaction_check_wi
     assert len(prepared.post_response_compaction_checks) == 1
     assert prepared.post_response_compaction_checks[0].session_id == "session-1"
     assert prepared.post_response_compaction_checks[0].scope.key == "agent:test_agent"
+    assert prepared.compaction_reply_outcome == "opportunistic"
     assert prepared.compaction_decision.mode == "opportunistic"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "configured"
@@ -805,6 +816,7 @@ async def test_prepare_history_for_run_records_post_response_compaction_check_fo
     assert len(prepared.post_response_compaction_checks) == 1
     assert prepared.post_response_compaction_checks[0].session_id == "session-1"
     assert prepared.post_response_compaction_checks[0].scope.key == "agent:test_agent"
+    assert prepared.compaction_reply_outcome == "opportunistic"
 
 
 @pytest.mark.asyncio
@@ -876,6 +888,735 @@ async def test_run_post_response_compaction_check_uses_updated_persisted_session
     assert isinstance(lifecycle.events[1], CompactionLifecycleSuccess)
     assert lifecycle.events[1].notice_event_id == "$compaction"
     assert lifecycle.events[1].outcome is outcome
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_records_post_response_check_for_manual_capable_auto_disabled_scope(
+    tmp_path: Path,
+) -> None:
+    """Manual-capable scopes should get a post-response slot even without authored auto compaction."""
+    config, runtime_paths = _make_config(tmp_path, context_window=64_000, defaults_compaction=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+
+    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_decision.reason == "auto_disabled"
+    assert len(prepared.post_response_compaction_checks) == 1
+    assert prepared.post_response_compaction_checks[0].execution_plan.authored_compaction_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_returns_cheaply_for_no_force_auto_disabled_scope(
+    tmp_path: Path,
+) -> None:
+    """No-force auto-disabled checks should stop before token estimation or model loading."""
+    config, runtime_paths = _make_config(tmp_path, context_window=64_000, defaults_compaction=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    storage.upsert_session(session)
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+
+    with (
+        patch(
+            "mindroom.history.runtime.estimate_prompt_visible_history_tokens",
+            side_effect=AssertionError("token estimation should not run"),
+        ),
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            side_effect=AssertionError("model loading should not run"),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=RecordingCompactionLifecycle(),
+        )
+
+    assert outcome is None
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_runs_forced_manual_with_auto_disabled_scope(
+    tmp_path: Path,
+) -> None:
+    """A force marker from compact_context should run manual compaction after the finalized reply."""
+    config, runtime_paths = _make_config(tmp_path, context_window=64_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
+    storage.upsert_session(session)
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    scope = check.scope
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+    lifecycle = RecordingCompactionLifecycle()
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="manual summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=lifecycle,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert outcome is not None
+    assert outcome.mode == "manual"
+    assert outcome.compacted_run_count == 2
+    assert outcome.history_budget_tokens == check.execution_plan.hard_replay_budget_tokens
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "manual summary"
+    assert len(lifecycle.events) == 2
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+    assert lifecycle.events[0].mode == "manual"
+    assert lifecycle.events[0].history_budget_tokens == check.execution_plan.hard_replay_budget_tokens
+    assert isinstance(lifecycle.events[1], CompactionLifecycleSuccess)
+    assert lifecycle.events[1].outcome is outcome
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_uses_compaction_model_window_when_active_model_has_none(
+    tmp_path: Path,
+) -> None:
+    """Forced post-response compaction should accept a None active-model replay budget."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(model="summary-model"),
+            ),
+            models={
+                "default": ModelConfig(provider="openai", id="test-model", context_window=None),
+                "summary-model": ModelConfig(provider="openai", id="summary-model", context_window=32_000),
+            },
+        ),
+        runtime_paths,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run("run-1", agent_id="test_agent"),
+            _completed_run("run-2", agent_id="test_agent"),
+            _completed_run("run-3", agent_id="test_agent"),
+            _completed_run("run-4", agent_id="test_agent"),
+        ],
+    )
+    storage.upsert_session(session)
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    scope = check.scope
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=RecordingCompactionLifecycle(),
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "merged summary"
+    assert outcome is not None
+    assert outcome.mode == "manual"
+    assert outcome.window_tokens == 0
+    assert outcome.history_budget_tokens is None
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_consumes_session_state_force_marker(
+    tmp_path: Path,
+) -> None:
+    """Post-response compaction should recover a manual request from Agno session_state."""
+    config, runtime_paths = _make_config(tmp_path, context_window=64_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
+    storage.upsert_session(session)
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    scope = check.scope
+    session.session_data = {"session_state": add_pending_force_compaction_scope({}, scope)}
+    storage.upsert_session(session)
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(return_value=SessionSummary(summary="fallback summary", updated_at=datetime.now(UTC))),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=RecordingCompactionLifecycle(),
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert outcome is not None
+    assert outcome.mode == "manual"
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert persisted.session_data is None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "fallback summary"
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_clears_forced_state_after_manual_failure(
+    tmp_path: Path,
+) -> None:
+    """A failed forced post-response attempt should clear force state like foreground compaction."""
+    config, runtime_paths = _make_config(tmp_path, context_window=64_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
+    storage.upsert_session(session)
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    scope = check.scope
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.session_data = {"session_state": add_pending_force_compaction_scope({}, scope)}
+    storage.upsert_session(session)
+    lifecycle = RecordingCompactionLifecycle()
+
+    with patch("mindroom.model_loading.get_model_instance", side_effect=ValueError("bad summary model")):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=lifecycle,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert outcome is None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2"]
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+    assert persisted.session_data is None
+    assert len(lifecycle.events) == 2
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+    assert lifecycle.events[0].mode == "manual"
+    assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
+    assert lifecycle.events[1].mode == "manual"
+    assert lifecycle.events[1].failure_reason == "bad summary model"
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_does_not_overwrite_newer_session_writes(
+    tmp_path: Path,
+) -> None:
+    """Opportunistic compaction should merge its completed prefix with newer session writes."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "old-run",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+
+    async def _write_newer_run_during_summary(*_args: object, **_kwargs: object) -> SessionSummary:
+        current = get_agent_session(storage, "session-1")
+        assert current is not None
+        current.runs = [
+            *(current.runs or []),
+            _completed_run(
+                "newer-run",
+                messages=[
+                    Message(role="user", content="new u"),
+                    Message(role="assistant", content="new a"),
+                ],
+            ),
+        ]
+        storage.upsert_session(current)
+        return SessionSummary(summary="stale summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=_write_newer_run_during_summary),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=None,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert outcome is not None
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["newer-run"]
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "stale summary"
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_completes_lifecycle_after_newer_session_write(
+    tmp_path: Path,
+) -> None:
+    """Visible opportunistic compaction should finish while preserving concurrent tail writes."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "old-run",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    lifecycle = RecordingCompactionLifecycle()
+
+    async def _write_newer_run_during_summary(*_args: object, **_kwargs: object) -> SessionSummary:
+        current = get_agent_session(storage, "session-1")
+        assert current is not None
+        current.runs = [
+            *(current.runs or []),
+            _completed_run(
+                "newer-run",
+                messages=[
+                    Message(role="user", content="new u"),
+                    Message(role="assistant", content="new a"),
+                ],
+            ),
+        ]
+        storage.upsert_session(current)
+        return SessionSummary(summary="stale summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=_write_newer_run_during_summary),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=lifecycle,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert outcome is not None
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["newer-run"]
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "stale summary"
+    assert len(lifecycle.events) == 2
+    assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
+    assert isinstance(lifecycle.events[1], CompactionLifecycleSuccess)
+    assert lifecycle.events[1].outcome.summary == "stale summary"
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_skips_stale_no_fit_write(
+    tmp_path: Path,
+) -> None:
+    """A stale silent no-fit compaction must not upsert its old session snapshot."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "old-run",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+
+    def _write_newer_run_and_make_no_chunk_fit(*_args: object, **_kwargs: object) -> tuple[str, list[RunOutput]]:
+        current = get_agent_session(storage, "session-1")
+        assert current is not None
+        current.runs = [
+            *(current.runs or []),
+            _completed_run(
+                "newer-run",
+                messages=[
+                    Message(role="user", content="new u"),
+                    Message(role="assistant", content="new a"),
+                ],
+            ),
+        ]
+        storage.upsert_session(current)
+        return "", []
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            side_effect=_write_newer_run_and_make_no_chunk_fit,
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=None,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert outcome is None
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["old-run", "newer-run"]
+    assert persisted.summary is None
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_forced_no_fit_preserves_newer_session_writes(
+    tmp_path: Path,
+) -> None:
+    """Forced no-fit compaction must clear state without upserting its old session snapshot."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "old-run",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+    scope = check.scope
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
+
+    def _write_newer_run_and_make_no_chunk_fit(*_args: object, **_kwargs: object) -> tuple[str, list[RunOutput]]:
+        current = get_agent_session(storage, "session-1")
+        assert current is not None
+        current.runs = [
+            *(current.runs or []),
+            _completed_run(
+                "newer-run",
+                messages=[
+                    Message(role="user", content="new u"),
+                    Message(role="assistant", content="new a"),
+                ],
+            ),
+        ]
+        storage.upsert_session(current)
+        return "", []
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._build_summary_input",
+            side_effect=_write_newer_run_and_make_no_chunk_fit,
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=None,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert outcome is None
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs or []] == ["old-run", "newer-run"]
+    assert persisted.summary is None
+    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
+
+
+@pytest.mark.asyncio
+async def test_run_post_response_compaction_check_preserves_newer_session_data(
+    tmp_path: Path,
+) -> None:
+    """Compaction must preserve newer session_data while writing its completed summary."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=10),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "old-run",
+                messages=[
+                    Message(role="user", content="u" * 120),
+                    Message(role="assistant", content="a" * 120),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+
+    prepared = await prepare_history_for_run(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+        static_prompt_tokens=0,
+    )
+    check = prepared.post_response_compaction_checks[0]
+
+    async def _write_pending_force_request_during_summary(*_args: object, **_kwargs: object) -> SessionSummary:
+        current = get_agent_session(storage, "session-1")
+        assert current is not None
+        current.session_data = {
+            "session_state": {
+                "mindroom_pending_compaction_scope_keys": ["agent:test_agent"],
+            },
+        }
+        storage.upsert_session(current)
+        return SessionSummary(summary="stale summary", updated_at=datetime.now(UTC))
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=AsyncMock(side_effect=_write_pending_force_request_during_summary),
+        ),
+    ):
+        outcome = await run_post_response_compaction_check(
+            check=check,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            compaction_lifecycle=None,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert outcome is not None
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == "stale summary"
+    assert persisted.runs == []
+    assert persisted.session_data == {
+        "session_state": {
+            "mindroom_pending_compaction_scope_keys": ["agent:test_agent"],
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -1051,6 +1792,7 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
     assert len(prepared.compaction_outcomes) == 1
     assert prepared.compaction_outcomes[0].lifecycle_notice_event_id == "$compaction"
     assert prepared.compaction_decision.mode == "required"
+    assert prepared.compaction_reply_outcome == "required_success"
     assert len(prepared.post_response_compaction_checks) == 1
     assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
     assert isinstance(lifecycle.events[1], CompactionLifecycleSuccess)
@@ -1099,6 +1841,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
     assert prepared.compaction_outcomes == []
     assert prepared.compaction_decision.mode == "required"
+    assert prepared.compaction_reply_outcome == "required_failed"
     assert len(prepared.post_response_compaction_checks) == 1
     assert len(lifecycle.events) == 2
     assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
@@ -1115,7 +1858,7 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
             return ModelResponse(content="merged summary")
 
     with (
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
         await _generate_compaction_summary(
@@ -1149,7 +1892,7 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
     start = asyncio.get_running_loop().time()
 
     with (
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
         await _generate_compaction_summary(
@@ -1171,6 +1914,7 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
             self.started = asyncio.Event()
             self.cancelled = asyncio.Event()
             self.finished = asyncio.Event()
+            self.release_after_cancel = asyncio.Event()
 
         async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
             self.started.set()
@@ -1178,17 +1922,16 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
                 self.cancelled.set()
-                await asyncio.sleep(0.05)
+                await self.release_after_cancel.wait()
                 return ModelResponse(content="merged summary")
             finally:
                 self.finished.set()
             raise AssertionError
 
     model = _SwallowingCancelSummaryModel(model_id="summary-model", provider="fake")
-    start = asyncio.get_running_loop().time()
 
     with (
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
         await _generate_compaction_summary(
@@ -1196,9 +1939,10 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
             summary_input="Current prompt",
         )
 
-    assert asyncio.get_running_loop().time() - start < 0.04
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
     await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
+    assert not model.finished.is_set()
+    model.release_after_cancel.set()
     await asyncio.wait_for(model.finished.wait(), timeout=0.2)
 
 
@@ -1214,6 +1958,67 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
             model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
         )
+
+
+def test_effective_summary_input_budget_caps_per_chunk() -> None:
+    assert effective_summary_input_budget_tokens(100_000, 256_000) == 32_000
+    assert effective_summary_input_budget_tokens(10_000, 256_000) == 10_000
+    assert effective_summary_input_budget_tokens(100_000, 12_000) == 3_000
+    assert effective_summary_input_budget_tokens(1_500, 1_000) == 1_500
+    assert effective_summary_input_budget_tokens(100_000, None) == 100_000
+
+
+@pytest.mark.asyncio
+async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    working_session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 8_000),
+                    Message(role="assistant", content="a" * 8_000),
+                ],
+            ),
+        ],
+    )
+    summary_inputs: list[str] = []
+
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+        summary_inputs.append(summary_input)
+        if len(summary_inputs) == 1:
+            msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"
+            raise RuntimeError(msg)
+        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+
+    with patch(
+        "mindroom.history.compaction._generate_compaction_summary",
+        new=AsyncMock(side_effect=fake_summary),
+    ):
+        rewrite_result = await _rewrite_working_session_for_compaction(
+            storage=storage,
+            persisted_session=working_session,
+            working_session=working_session,
+            summary_model=FakeModel(id="summary-model", provider="fake"),
+            session_id="session-1",
+            scope=scope,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_settings=ResolvedHistorySettings(
+                policy=HistoryPolicy(mode="all"),
+                max_tool_calls_from_history=None,
+            ),
+            available_history_budget=None,
+            summary_input_budget=8_000,
+            compaction_context_window=16_000,
+            collect_compaction_hook_messages=False,
+        )
+
+    assert rewrite_result is not None
+    assert len(summary_inputs) == 2
+    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
 
 
 @pytest.mark.asyncio
@@ -1362,7 +2167,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
     model = _DetachedTimeoutCleanupSummaryModel(model_id="summary-model", provider="fake")
 
     with (
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         patch("mindroom.history.compaction._COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
@@ -1414,7 +2219,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
             "mindroom.model_loading.get_model_instance",
             return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
         ),
-        patch("mindroom.history.compaction.MINDROOM_COMPACTION_CALL_TIMEOUT_SECONDS", 0.01),
+        patch("mindroom.history.compaction.MINDROOM_COMPACTION_TOTAL_TIMEOUT_SECONDS", 0.01),
     ):
         prepared = await prepare_history_for_run(
             agent=_agent(db=storage),
@@ -2047,7 +2852,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_auto_compaction_finishes_selected_runs_across_multiple_passes(
+async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_across_multiple_passes(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(
@@ -2084,6 +2889,8 @@ async def test_prepare_history_for_run_auto_compaction_finishes_selected_runs_ac
     )
     storage.upsert_session(session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
@@ -2189,6 +2996,160 @@ async def test_prepare_history_for_run_auto_compaction_finishes_selected_runs_ac
 
 
 @pytest.mark.asyncio
+async def test_prepare_history_for_run_auto_compaction_runs_to_completion_in_background(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-2",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+            _completed_run(
+                "run-3",
+                messages=[
+                    Message(role="user", content="u" * 200),
+                    Message(role="assistant", content="a" * 200),
+                ],
+            ),
+        ],
+    )
+    storage.upsert_session(session)
+    history_settings = ResolvedHistorySettings(
+        policy=HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=None,
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    visible_runs = list(session.runs or [])
+    first_summary_text = "first pass summary"
+    second_summary_text = "second pass summary"
+
+    def _included_run_count(
+        previous_summary: str | None,
+        compacted_runs: list[RunOutput | TeamRunOutput],
+        budget: int,
+    ) -> int:
+        return len(
+            _build_summary_input(
+                previous_summary=previous_summary,
+                compacted_runs=compacted_runs,
+                max_input_tokens=budget,
+            )[1],
+        )
+
+    summary_input_budget = next(
+        budget
+        for budget in range(1, 10_000)
+        if _included_run_count(None, visible_runs, budget) == 2
+        and _included_run_count(first_summary_text, visible_runs[2:], budget) == 1
+    )
+
+    execution_plan = ResolvedHistoryExecutionPlan(
+        authored_compaction_config=True,
+        authored_compaction_enabled=True,
+        destructive_compaction_available=True,
+        explicit_compaction_model=True,
+        compaction_model_name="summary-model",
+        compaction_context_window=4_096,
+        replay_window_tokens=64_000,
+        trigger_threshold_tokens=1,
+        reserve_tokens=0,
+        static_prompt_tokens=0,
+        replay_budget_tokens=1,
+        summary_input_budget_tokens=summary_input_budget,
+    )
+
+    summary_mock = AsyncMock(
+        side_effect=[
+            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+            SessionSummary(summary=second_summary_text, updated_at=datetime.now(UTC)),
+        ],
+    )
+    scheduled_compactions: list[Coroutine[object, object, None]] = []
+
+    def _capture_background_task(
+        coro: Coroutine[object, object, None],
+        **_kwargs: object,
+    ) -> asyncio.Task[None]:
+        scheduled_compactions.append(coro)
+        return asyncio.create_task(asyncio.sleep(0))
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=summary_mock,
+        ),
+        patch(
+            "mindroom.history.runtime.create_background_task",
+            new=_capture_background_task,
+        ),
+    ):
+        prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+            history_settings=history_settings,
+            execution_plan=execution_plan,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2", "run-3"]
+    assert summary_mock.await_count == 0
+    assert prepared.compaction_outcomes == []
+    assert len(scheduled_compactions) == 1
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=summary_mock,
+        ),
+    ):
+        await scheduled_compactions[0]
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary.summary == second_summary_text
+    assert persisted.runs == []
+    assert summary_mock.await_count == 2
+    state = read_scope_state(persisted, scope)
+    assert state.last_compacted_run_count == 3
+
+
+@pytest.mark.asyncio
 async def test_prepare_history_for_run_persists_successful_compaction_chunks_before_later_failure(
     tmp_path: Path,
 ) -> None:
@@ -2226,6 +3187,8 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     )
     storage.upsert_session(session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
+    write_scope_state(session, scope, HistoryScopeState(force_compact_before_next_run=True))
+    storage.upsert_session(session)
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
@@ -2319,7 +3282,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_auto_compaction_compacts_all_runs_when_over_budget(
+async def test_prepare_history_for_run_deduplicates_pending_auto_compaction(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(
@@ -2366,6 +3329,15 @@ async def test_prepare_history_for_run_auto_compaction_compacts_all_runs_when_ov
     summary_mock = AsyncMock(
         return_value=SessionSummary(summary="all runs summary", updated_at=datetime.now(UTC)),
     )
+    scheduled_compactions: list[Coroutine[object, object, None]] = []
+
+    def _capture_background_task(
+        coro: Coroutine[object, object, None],
+        **_kwargs: object,
+    ) -> asyncio.Task[None]:
+        scheduled_compactions.append(coro)
+        return asyncio.create_task(asyncio.sleep(0))
+
     with (
         patch(
             "mindroom.model_loading.get_model_instance",
@@ -2375,8 +3347,12 @@ async def test_prepare_history_for_run_auto_compaction_compacts_all_runs_when_ov
             "mindroom.history.compaction._generate_compaction_summary",
             new=summary_mock,
         ),
+        patch(
+            "mindroom.history.runtime.create_background_task",
+            new=_capture_background_task,
+        ),
     ):
-        prepared = await prepare_history_for_run(
+        first_prepared = await prepare_history_for_run(
             agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -2388,6 +3364,41 @@ async def test_prepare_history_for_run_auto_compaction_compacts_all_runs_when_ov
             session=session,
             available_history_budget=1,
         )
+        persisted_before_second = get_agent_session(storage, "session-1")
+        assert persisted_before_second is not None
+        second_prepared = await prepare_history_for_run(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=persisted_before_second,
+            available_history_budget=1,
+        )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.summary is None
+    assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2", "run-3", "run-4"]
+    assert summary_mock.await_count == 0
+    assert first_prepared.compaction_outcomes == []
+    assert second_prepared.compaction_outcomes == []
+    assert len(scheduled_compactions) == 1
+
+    with (
+        patch(
+            "mindroom.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction._generate_compaction_summary",
+            new=summary_mock,
+        ),
+    ):
+        await scheduled_compactions[0]
 
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
@@ -2395,10 +3406,6 @@ async def test_prepare_history_for_run_auto_compaction_compacts_all_runs_when_ov
     assert persisted.summary.summary == "all runs summary"
     assert persisted.runs == []
     assert summary_mock.await_count == 1
-    assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].runs_before == 4
-    assert prepared.compaction_outcomes[0].runs_after == 0
-    assert prepared.compaction_outcomes[0].compacted_run_count == 4
 
 
 @pytest.mark.asyncio
@@ -3158,6 +4165,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             ),
             available_history_budget=1,
             summary_input_budget=summary_input_budget,
+            compaction_context_window=16_000,
             collect_compaction_hook_messages=False,
         )
     assert rewrite_result is not None
@@ -4223,6 +5231,53 @@ async def test_prepare_agent_and_prompt_uses_thread_history_when_persisted_repla
     assert prepared_agent is live_agent
     assert prepared.replays_persisted_history is False
     assert full_prompt == "alice: Earlier context\n\nbob: More context\n\nCurrent prompt"
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_missing_replay(
+    tmp_path: Path,
+) -> None:
+    config, runtime_paths = _make_config(tmp_path)
+    live_agent = _agent()
+    thread_history = [
+        make_visible_message(sender="@alice:localhost", body="Original question", event_id="$root"),
+        make_visible_message(sender="@bot:localhost", body="Prior diagnosis", event_id="$agent-reply"),
+        make_visible_message(sender="@alice:localhost", body="What was that?", event_id="$current"),
+    ]
+
+    with (
+        patch.object(
+            Config,
+            "get_ids",
+            return_value={"test_agent": SimpleNamespace(full_id="@bot:localhost")},
+        ),
+        patch("mindroom.ai.create_agent", return_value=live_agent),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        patch(
+            "mindroom.execution_preparation.prepare_scope_history",
+            new=AsyncMock(return_value=MagicMock()),
+        ),
+        patch(
+            "mindroom.execution_preparation.finalize_history_preparation",
+            return_value=PreparedHistoryState(replays_persisted_history=False),
+        ),
+    ):
+        prepared_run = await _prepare_agent_and_prompt(
+            "test_agent",
+            "What was that?",
+            runtime_paths,
+            config,
+            thread_history=thread_history,
+            reply_to_event_id="$current",
+            current_sender_id="@alice:localhost",
+        )
+
+    assert prepared_run.prepared_history.replays_persisted_history is False
+    assert prepared_run.prompt_text == (
+        "@alice:localhost: Original question\n\n"
+        "Prior diagnosis\n\n"
+        'Current message:\n<msg from="@alice:localhost"><![CDATA[What was that?]]></msg>'
+    )
 
 
 @pytest.mark.asyncio

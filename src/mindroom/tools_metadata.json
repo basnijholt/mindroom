@@ -6945,7 +6945,7 @@
       "config_fields": [],
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Schedule context compaction for the next reply in the current conversation scope",
+      "description": "Run context compaction after the current reply finalizes; fallback attempts before the next reply if needed",
       "display_name": "Context Compaction",
       "docs_url": null,
       "function_names": [],
