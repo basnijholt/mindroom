@@ -3416,19 +3416,23 @@ def test_workspace_env_hook_edits_take_effect_on_next_call(
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
-def test_workspace_env_hook_filters_secrets(
+def test_workspace_env_hook_keeps_user_credentials_and_filters_runner_control(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Secret-suffixed exports must not reach the executed shell environment."""
+    """Explicit hook exports pass except for runner control-plane names."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     workspace = storage_root / "agents" / "general" / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     _write_workspace_env_hook(
         workspace,
-        "export OPENAI_API_KEY=leaked\nexport GITEA_TOKEN=keep\n",
+        "export OPENAI_API_KEY=from-hook\n"
+        "export STRIPE_SECRET=from-hook\n"
+        "export GITEA_TOKEN=from-hook\n"
+        "export MINDROOM_SANDBOX_PROXY_TOKEN=leaked\n"
+        "export MINDROOM_SANDBOX_FOO=leaked\n",
     )
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -3441,7 +3445,20 @@ def test_workspace_env_hook_filters_secrets(
             json={
                 "tool_name": "shell",
                 "function_name": "run_shell_command",
-                "args": [["bash", "-c", 'printf "%s|%s" "${OPENAI_API_KEY:-}" "${GITEA_TOKEN:-}"']],
+                "args": [
+                    [
+                        "bash",
+                        "-c",
+                        (
+                            'printf "%s|%s|%s|%s|%s" '
+                            '"${OPENAI_API_KEY:-}" '
+                            '"${STRIPE_SECRET:-}" '
+                            '"${GITEA_TOKEN:-}" '
+                            '"${MINDROOM_SANDBOX_PROXY_TOKEN:-}" '
+                            '"${MINDROOM_SANDBOX_FOO:-}"'
+                        ),
+                    ],
+                ],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:shared:general",
                 "tool_init_overrides": {"base_dir": "agents/general/workspace"},
@@ -3451,9 +3468,12 @@ def test_workspace_env_hook_filters_secrets(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True, payload
-    api_key, token = payload["result"].split("|", 1)
-    assert api_key == ""
-    assert token == "keep"  # noqa: S105
+    api_key, stripe_secret, token, proxy_token, sandbox_value = payload["result"].split("|", 4)
+    assert api_key == "from-hook"
+    assert stripe_secret == "from-hook"  # noqa: S105
+    assert token == "from-hook"  # noqa: S105
+    assert proxy_token == ""
+    assert sandbox_value == ""
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
