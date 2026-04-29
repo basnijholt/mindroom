@@ -41,7 +41,7 @@ from mindroom.memory import (
 from mindroom.memory._prompting import _format_memories_as_context
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
-from tests.memory_test_support import MockTeamConfig
+from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -601,14 +601,13 @@ class TestMemoryFacade:
         mock_memory.add.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_store_conversation_memory_team_uses_mem0_when_any_member_overrides(
+    async def test_store_conversation_memory_team_writes_each_members_effective_backend(
         self,
         mock_memory: AsyncMock,
         storage_path: Path,
         config: Config,
     ) -> None:
         config.memory.backend = "file"
-        config.memory.file.path = str(storage_path / "memory-files")
         config.agents["calculator"].memory_backend = "mem0"
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
@@ -620,21 +619,77 @@ class TestMemoryFacade:
                 config,
             )
 
-        assert mock_create.call_count == 2
         expected_runtime_paths = runtime_paths_for(config)
-        assert [(call.args, call.kwargs) for call in mock_create.call_args_list] == [
-            (
-                (agent_state_root_path(storage_path, "calculator"), config),
-                {"runtime_paths": expected_runtime_paths},
-            ),
-            (
-                (agent_state_root_path(storage_path, "finance"), config),
-                {"runtime_paths": expected_runtime_paths},
-            ),
-        ]
-        assert mock_memory.add.call_count == 2
-        team_memory_file = storage_path / "memory-files" / "team_calculator+finance" / "MEMORY.md"
-        assert not team_memory_file.exists()
+        mock_create.assert_called_once_with(
+            agent_state_root_path(storage_path, "calculator"),
+            config,
+            runtime_paths=expected_runtime_paths,
+        )
+        mock_memory.add.assert_called_once()
+        mem0_call = mock_memory.add.call_args
+        assert mem0_call[1]["user_id"] == "team_calculator+finance"
+        assert mem0_call[1]["metadata"]["team_members"] == ["calculator", "finance"]
+
+        file_team_memory = (
+            agent_state_root_path(storage_path, "finance") / "memory_files" / "team_calculator+finance" / "MEMORY.md"
+        )
+        assert file_team_memory.exists()
+        assert "Analyze our quarterly metrics" in file_team_memory.read_text(encoding="utf-8")
+        mem0_team_memory_file = (
+            agent_state_root_path(storage_path, "calculator") / "memory_files" / "team_calculator+finance" / "MEMORY.md"
+        )
+        assert not mem0_team_memory_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_mixed_team_memory_reads_through_each_members_effective_backend(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        config.memory.backend = "file"
+        config.agents["calculator"].memory_backend = "mem0"
+        config.teams = {"mixed_team": MockTeamConfig(agents=["calculator", "finance"])}
+        mem0_stores: dict[Path, FakeMem0ScopedMemory] = {}
+
+        async def create_fake_memory_instance(
+            scope_storage_path: Path,
+            _config: Config,
+            *,
+            runtime_paths: object,
+            timing_scope: str | None = None,
+        ) -> FakeMem0ScopedMemory:
+            del runtime_paths, timing_scope
+            if scope_storage_path not in mem0_stores:
+                mem0_stores[scope_storage_path] = FakeMem0ScopedMemory()
+            return mem0_stores[scope_storage_path]
+
+        with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
+            await store_conversation_memory(
+                "Mixed backend team insight",
+                ["calculator", "finance"],
+                storage_path,
+                "session-team",
+                config,
+            )
+            calculator_results = await search_agent_memories(
+                "Mixed backend team",
+                "calculator",
+                storage_path,
+                config,
+                limit=5,
+            )
+
+        finance_results = await search_agent_memories("Mixed backend team", "finance", storage_path, config, limit=5)
+
+        assert any(
+            result.get("memory") == "Mixed backend team insight" and result.get("user_id") == "team_calculator+finance"
+            for result in calculator_results
+        )
+        assert any(
+            result.get("memory") == "Mixed backend team insight" and result.get("user_id") == "team_calculator+finance"
+            for result in finance_results
+        )
+        assert set(mem0_stores) == {agent_state_root_path(storage_path, "calculator")}
 
     @pytest.mark.asyncio
     async def test_search_agent_memories_with_teams(

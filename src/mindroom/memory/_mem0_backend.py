@@ -485,10 +485,14 @@ async def store_mem0_conversation_memory(
     *,
     replica_key: str | None,
     create_memory: _MemoryFactory,
+    target_agent_names: list[str] | None = None,
 ) -> None:
     """Persist conversation messages to mem0-backed memory scopes."""
+    target_context: str | list[str] = agent_name
+    if target_agent_names is not None:
+        target_context = target_agent_names
     target_storage_paths = effective_storage_paths_for_context(
-        agent_name,
+        target_context,
         storage_path,
         config,
         runtime_paths,

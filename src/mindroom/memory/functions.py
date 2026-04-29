@@ -34,7 +34,6 @@ from ._policy import (
     agent_scope_user_id,
     caller_uses_file_memory_backend,
     resolve_file_memory_resolution,
-    team_uses_file_memory_backend,
     use_file_memory_backend,
 )
 from ._prompting import (
@@ -55,6 +54,19 @@ if TYPE_CHECKING:
     from ._shared import ScopedMemoryCrud
 
 logger = get_logger(__name__)
+
+
+def _team_members_by_memory_backend(config: Config, agent_names: list[str]) -> dict[str, list[str]]:
+    """Group team members by their effective memory backend."""
+    config.assert_team_agents_supported(agent_names)
+    members_by_backend: dict[str, list[str]] = {"mem0": [], "file": []}
+    for member_name in agent_names:
+        backend = config.get_agent_memory_backend(member_name)
+        if backend not in members_by_backend:
+            msg = f"Unsupported memory backend for team member {member_name}: {backend}"
+            raise ValueError(msg)
+        members_by_backend[backend].append(member_name)
+    return members_by_backend
 
 
 @dataclass(frozen=True)
@@ -440,12 +452,40 @@ async def store_conversation_memory(
     if not prompt:
         return
 
-    use_file_backend = (
-        use_file_memory_backend(config, agent_name=agent_name)
-        if isinstance(agent_name, str)
-        else team_uses_file_memory_backend(config, agent_name)
-    )
-    if use_file_backend:
+    if isinstance(agent_name, list):
+        members_by_backend = _team_members_by_memory_backend(config, agent_name)
+        file_member_names = members_by_backend["file"]
+        mem0_member_names = members_by_backend["mem0"]
+        if file_member_names:
+            store_file_conversation_memory(
+                prompt,
+                agent_name,
+                storage_path,
+                config,
+                runtime_paths,
+                execution_identity=execution_identity,
+                target_agent_names=None if file_member_names == agent_name else file_member_names,
+            )
+        if not mem0_member_names:
+            return
+        messages = build_memory_messages(prompt, thread_history, user_id)
+        if not messages:
+            return
+        await store_mem0_conversation_memory(
+            messages,
+            agent_name,
+            storage_path,
+            session_id,
+            config,
+            runtime_paths,
+            replica_key=new_memory_id(),
+            create_memory=_create_memory_factory(runtime_paths),
+            execution_identity=execution_identity,
+            target_agent_names=None if mem0_member_names == agent_name else mem0_member_names,
+        )
+        return
+
+    if use_file_memory_backend(config, agent_name=agent_name):
         store_file_conversation_memory(
             prompt,
             agent_name,

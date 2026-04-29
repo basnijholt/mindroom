@@ -825,14 +825,19 @@ def store_file_conversation_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
+    target_agent_names: list[str] | None = None,
 ) -> None:
     """Persist condensed conversation text to file-backed memory scopes."""
     condensed_prompt = " ".join(prompt.strip().split())
     if not condensed_prompt:
         return
 
+    target_context: str | list[str] = agent_name
+    if target_agent_names is not None:
+        target_context = target_agent_names
     target_storage_paths = effective_storage_paths_for_context(
-        agent_name,
+        target_context,
         storage_path,
         config,
         runtime_paths,
