@@ -141,6 +141,7 @@ class MatrixMessageOperations:
         room_id: str,
         effective_thread_id: str | None,
         ignore_mentions: bool,
+        as_voice: bool,
     ) -> MatrixMessageOperationResult:
         if action in {"thread-reply", "reply"} and effective_thread_id is None:
             return self._result("error", action=action, message="thread_id is required for replies.")
@@ -227,6 +228,7 @@ class MatrixMessageOperations:
                     thread_id=effective_thread_id,
                     latest_thread_event_id=latest_thread_event_id,
                     conversation_cache=context.conversation_cache,
+                    as_voice=as_voice,
                 )
                 if first_attachment_event_id is None:
                     return self._result(
@@ -249,6 +251,7 @@ class MatrixMessageOperations:
                     room_id=room_id,
                     thread_id=attachment_thread_id,
                     attachment_paths=remaining_attachment_paths,
+                    as_voice=as_voice,
                 )
                 attachment_event_ids.extend(remaining_attachment_event_ids)
                 if send_error is not None:
@@ -277,6 +280,7 @@ class MatrixMessageOperations:
                     thread_id=attachment_thread_id,
                     require_joined_room=False,
                     inherit_context_thread=False,
+                    as_voice=as_voice,
                 )
                 if send_result is not None:
                     attachment_thread_id = send_result.thread_id
@@ -698,6 +702,7 @@ class MatrixMessageOperations:
         target: str | None,
         thread_id: str | None,
         ignore_mentions: bool,
+        as_voice: bool,
         read_limit: int,
         page_token: str | None,
         room_timeline_sentinel: str,
@@ -721,6 +726,7 @@ class MatrixMessageOperations:
                 room_id=room_id,
                 effective_thread_id=effective_thread_id,
                 ignore_mentions=ignore_mentions,
+                as_voice=as_voice,
             )
         if action == "react":
             return await self._message_react(
