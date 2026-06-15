@@ -148,8 +148,11 @@ class DynamicToolsToolkit(Toolkit):
                 "already_loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
-                message=f"Tool '{tool_name}' is already loaded for this session.",
+                takes_effect="later_tool_call_step",
+                message=(
+                    f"Tool '{tool_name}' is already loaded. Continue the same response and call it "
+                    "in a later tool-call step."
+                ),
             )
         elif result.status == "error":
             response = self._session_error(tool_name=tool_name, loaded_tools=loaded_tools)
@@ -177,8 +180,11 @@ class DynamicToolsToolkit(Toolkit):
                 "loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
-                message=f"Tool '{tool_name}' will be available on the next request in this session.",
+                takes_effect="later_tool_call_step",
+                message=(
+                    f"Tool '{tool_name}' is loaded. Continue the same task and call it in a later "
+                    "tool-call step in this same response. Do not wait for another user message."
+                ),
             )
         return response
 
@@ -196,8 +202,8 @@ class DynamicToolsToolkit(Toolkit):
     def load_tool(self, tool_name: str) -> str:
         """Load one deferred tool for the current session.
 
-        The requested tool becomes available on the next request in the same
-        session, not later in the current model run.
+        The requested tool becomes available after this tool-call result is
+        processed, so continue in a later tool-call step in the same response.
         """
         result = load_tool_for_session(
             agent_name=self._agent_name,
@@ -211,8 +217,8 @@ class DynamicToolsToolkit(Toolkit):
     def unload_tool(self, tool_name: str) -> str:
         """Unload one deferred tool from the current session.
 
-        The tool stops being available on the next request in the same session,
-        not later in the current model run.
+        The tool stops being available after this tool-call result is processed,
+        so continue without it in later tool-call steps in the same response.
         """
         loaded_tools = self._loaded_tools()
         deferred_tools = self._deferred_tool_names()
@@ -238,7 +244,7 @@ class DynamicToolsToolkit(Toolkit):
                 "not_loaded",
                 tool_name=tool_name,
                 loaded_tools=loaded_tools,
-                takes_effect="next_request",
+                takes_effect="later_tool_call_step",
                 message=f"Tool '{tool_name}' is not currently loaded for this session.",
             )
 
@@ -255,8 +261,11 @@ class DynamicToolsToolkit(Toolkit):
             "unloaded",
             tool_name=tool_name,
             loaded_tools=saved_loaded_tools,
-            takes_effect="next_request",
-            message=f"Tool '{tool_name}' will be removed on the next request in this session.",
+            takes_effect="later_tool_call_step",
+            message=(
+                f"Tool '{tool_name}' is unloaded. Continue the same response without calling it "
+                "in later tool-call steps."
+            ),
         )
 
     @staticmethod

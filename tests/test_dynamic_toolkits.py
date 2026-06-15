@@ -557,7 +557,11 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     search_payload = _tool_payload(manager.tool_search("sleep"))
     assert [match["name"] for match in search_payload["matches"]] == ["sleep"]
 
-    assert _tool_payload(manager.load_tool("sleep"))["status"] == "loaded"
+    loaded_payload = _tool_payload(manager.load_tool("sleep"))
+    assert loaded_payload["status"] == "loaded"
+    assert loaded_payload["takes_effect"] == "later_tool_call_step"
+    assert "same response" in loaded_payload["message"]
+    assert "next request" not in loaded_payload["message"]
     assert _tool_payload(manager.load_tool("sleep"))["status"] == "already_loaded"
     assert _tool_payload(manager.unload_tool("shell"))["status"] == "sticky"
     assert _tool_payload(manager.unload_tool("sleep"))["status"] == "unloaded"
@@ -762,6 +766,10 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
 
     assert static_before == static_after
     assert "shell - Execute shell commands" in static_before
+    assert "later tool-call step in the same response" in static_before
+    assert "Do not wait for another user message" in static_before
+    assert "same parallel tool-call batch" in static_before
+    assert "next request" not in static_before
     assert suffix_before != suffix_after
     assert (
         suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"
